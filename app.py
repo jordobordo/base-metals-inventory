@@ -29,8 +29,13 @@ from scripts.schema import (  # noqa: E402
 
 DATA_PATH = Path(__file__).parent / "data" / "copper_inventory.parquet"
 
-BUCKETS = ["on_warrant", "cancelled", "off_warrant"]
-BUCKET_LABELS = {"on_warrant": "On-warrant", "cancelled": "Cancelled", "off_warrant": "Off-warrant"}
+BUCKETS = ["on_warrant", "cancelled", "unregistered", "off_warrant"]
+BUCKET_LABELS = {
+    "on_warrant": "On-warrant",
+    "cancelled": "Cancelled",
+    "unregistered": "Unregistered",
+    "off_warrant": "Off-warrant (shadow)",
+}
 EXCHANGES = ["cme", "lme", "shfe"]
 EXCHANGE_LABELS = {"cme": "CME (COMEX)", "lme": "LME", "shfe": "SHFE"}
 
@@ -150,14 +155,24 @@ st.caption(f"Last pipeline run **{latest['run_date'].date()}** — data as of: {
 # --------------------------------------------------------------------------- #
 # KPI row
 # --------------------------------------------------------------------------- #
-k = st.columns(4)
-k[0].metric("Global reported stock",
+k = st.columns(5)
+k[0].metric("Reported stock",
             fmt(latest.get("global_reported_stock_t"), unit_div, unit_suffix),
-            delta_str("global_reported_stock_t"))
+            delta_str("global_reported_stock_t"),
+            help="Exchange-monitored warehouse stock = on-warrant + cancelled + "
+                 "unregistered. Consistent across CME / LME / SHFE; excludes LME "
+                 "off-warrant (shadow).")
 for col, b in zip(k[1:], BUCKETS):
-    col.metric(f"Global {BUCKET_LABELS[b].lower()}",
+    col.metric(BUCKET_LABELS[b],
                fmt(latest.get(f"global_{b}_t"), unit_div, unit_suffix),
                delta_str(f"global_{b}_t"))
+st.caption(
+    "**On-warrant** registered/pledged · **Cancelled** warranted, earmarked for "
+    "withdrawal (LME only) · **Unregistered** spec metal in-shed, not warranted "
+    "(COMEX Eligible + SHFE 库存−仓单) · **Off-warrant (shadow)** off the exchange "
+    "warrant system (LME OWSR only). "
+    f"Grand total incl. shadow: **{fmt(latest.get('global_total_t'), unit_div, unit_suffix)}**."
+)
 
 st.divider()
 
@@ -200,7 +215,8 @@ st.subheader("Breakdown & day-over-day change")
 _BUCKET_COLS = [
     ("On-warrant", "on_warrant_t"),
     ("Cancelled", "cancelled_t"),
-    ("Off-warrant", "off_warrant_t"),
+    ("Unregistered", "unregistered_t"),
+    ("Off-warrant (shadow)", "off_warrant_t"),
     ("Reported stock", "total_t"),
 ]
 
@@ -223,10 +239,11 @@ def usd_delta(col: str) -> str | None:
 
 # gentle tints per stock type: (cell background, header background)
 _TINT = {
-    "On-warrant": ("#eef4fb", "#d6e5f6"),
-    "Cancelled": ("#fdf3e8", "#f6e2c8"),
-    "Off-warrant": ("#eef6ee", "#d8ecd8"),
-    "Reported stock": ("#f3f1f9", "#e1dbf1"),
+    "On-warrant": ("#eef4fb", "#d6e5f6"),          # blue  — pledged
+    "Cancelled": ("#fdf3e8", "#f6e2c8"),           # amber — withdrawal queue
+    "Unregistered": ("#eafaf5", "#cdeee4"),        # teal  — in-shed, unpledged
+    "Off-warrant (shadow)": ("#f0f1f4", "#dcdfe6"),  # grey  — shadow / off-system
+    "Reported stock": ("#f3f1f9", "#e1dbf1"),      # lavender — the headline total
     "_plain": ("#f1f3f6", "#dfe3ea"),
 }
 _CENTER = "center !important"
@@ -277,12 +294,14 @@ bt = pd.DataFrame(rows).set_index("Exchange")
 _bt_groups = [(m, [f"{m} ({unit_suffix})", f"{m} Δ"]) for m, _ in _BUCKET_COLS]
 st.table(styled_table(bt, _bt_groups, {f"{m} ({unit_suffix})": "{:,.0f}" for m, _ in _BUCKET_COLS}))
 st.caption(
-    "**Reported stock** = each exchange's headline figure: CME = Registered + "
-    "Eligible; LME = on-warrant (live + cancelled); SHFE = 库存. Off-warrant is a "
-    "separate figure only LME publishes — *not* in LME's reported stock, but *is* "
-    "in `global_total_t`. SHFE *Cancelled* is the implied non-warranted portion "
-    "(库存 − 仓单). Values in "
-    f"{unit}; **Δ is in tonnes** (latest run vs previous), % in brackets. "
+    "Per exchange — **On-warrant**: CME Registered / LME Live / SHFE 仓单. "
+    "**Cancelled**: LME Cancelled Tonnage only (CME & SHFE have no such queue → 0). "
+    "**Unregistered**: CME Eligible / SHFE 库存−仓单 — spec metal in an "
+    "exchange-monitored shed, not on warrant. **Off-warrant (shadow)**: LME OWSR "
+    "only — metal off the exchange warrant system. **Reported stock** = "
+    "on-warrant + cancelled + unregistered (all in exchange-monitored warehouses; "
+    "excludes shadow). "
+    f"Values in {unit}; **Δ is in tonnes** (latest run vs previous), % in brackets. "
     f"SHFE daily warrant (side feed): "
     f"{fmt(latest.get('shfe_warrant_daily_t'), unit_div, unit_suffix)} @ "
     f"{pd.to_datetime(latest.get('shfe_warrant_daily_date')).date() if pd.notna(latest.get('shfe_warrant_daily_date')) else 'n/a'}."

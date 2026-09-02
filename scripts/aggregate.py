@@ -88,10 +88,11 @@ def _run_cme() -> dict[str, Any]:
     reg_t = rec["registered_short_tons"] * SHORT_TON_TO_TONNE
     elig_t = rec["eligible_short_tons"] * SHORT_TON_TO_TONNE
     return {
-        "cme_on_warrant_t": round(reg_t, 3),
-        "cme_cancelled_t": 0.0,
-        "cme_off_warrant_t": round(elig_t, 3),
-        "cme_total_t": round(reg_t + elig_t, 3),
+        "cme_on_warrant_t": round(reg_t, 3),        # Registered
+        "cme_cancelled_t": 0.0,                     # no cancelled-warrant mechanism
+        "cme_unregistered_t": round(elig_t, 3),     # Eligible — in-shed, not warranted
+        "cme_off_warrant_t": float("nan"),          # COMEX reports no shadow stock
+        "cme_total_t": round(reg_t + elig_t, 3),    # reported stock = Registered + Eligible
         "cme_data_date": rec["report_date"],
         "cme_registered_short_tons": rec["registered_short_tons"],
         "cme_eligible_short_tons": rec["eligible_short_tons"],
@@ -103,6 +104,7 @@ def _run_lme_warrants() -> dict[str, Any]:
     return {
         "lme_on_warrant_t": rec["live_warrant_tonnes"],
         "lme_cancelled_t": rec["cancelled_warrant_tonnes"],
+        "lme_unregistered_t": 0.0,   # LME's non-warranted metal is the OWSR / off-warrant leg
         "lme_warrant_data_date": rec["report_date"],
         "_lme_closing_t": rec["total_on_warrant_tonnes"],  # internal, for the total
     }
@@ -111,7 +113,7 @@ def _run_lme_warrants() -> dict[str, Any]:
 def _run_lme_offwarrant() -> dict[str, Any]:
     rec = get_lme_copper_offwarrant()
     return {
-        "lme_off_warrant_t": rec["off_warrant_tonnes"],
+        "lme_off_warrant_t": rec["off_warrant_tonnes"],  # shadow — off the warrant system
         "lme_offwarrant_data_date": rec["report_date"],
     }
 
@@ -119,10 +121,11 @@ def _run_lme_offwarrant() -> dict[str, Any]:
 def _run_shfe(enrich_with_daily: bool) -> dict[str, Any]:
     rec = get_shfe_copper_stocks(enrich_with_daily=enrich_with_daily)
     return {
-        "shfe_on_warrant_t": rec["futures_warrant_tonnes"],
-        "shfe_cancelled_t": rec["implied_non_warranted_tonnes"],
-        "shfe_off_warrant_t": float("nan"),
-        "shfe_total_t": rec["physical_inventory_tonnes"],
+        "shfe_on_warrant_t": rec["futures_warrant_tonnes"],           # 仓单
+        "shfe_cancelled_t": 0.0,                                      # no cancelled-warrant queue
+        "shfe_unregistered_t": rec["implied_non_warranted_tonnes"],   # 库存 − 仓单, in-shed
+        "shfe_off_warrant_t": float("nan"),                           # not reported
+        "shfe_total_t": rec["physical_inventory_tonnes"],             # reported stock = 库存
         "shfe_data_date": rec["report_date"],
         "shfe_warrant_daily_t": rec.get("futures_warrant_tonnes_daily", float("nan")),
         "shfe_warrant_daily_date": rec.get("futures_warrant_daily_date"),
@@ -172,15 +175,18 @@ def collect(
 
     tasks: list[tuple[str, Callable[[], dict[str, Any]], type[Exception], list[str], str]] = [
         ("CME", _run_cme, CMEScraperError,
-         ["cme_on_warrant_t", "cme_cancelled_t", "cme_off_warrant_t", "cme_total_t",
-          "cme_data_date", "cme_registered_short_tons", "cme_eligible_short_tons"], "cme_stale"),
+         ["cme_on_warrant_t", "cme_cancelled_t", "cme_unregistered_t", "cme_off_warrant_t",
+          "cme_total_t", "cme_data_date", "cme_registered_short_tons",
+          "cme_eligible_short_tons"], "cme_stale"),
         ("LME", _run_lme_warrants, LMEScraperError,
-         ["lme_on_warrant_t", "lme_cancelled_t", "lme_warrant_data_date"], "lme_stale"),
+         ["lme_on_warrant_t", "lme_cancelled_t", "lme_unregistered_t",
+          "lme_warrant_data_date"], "lme_stale"),
         ("LME_OWSR", _run_lme_offwarrant, LMEScraperError,
          ["lme_off_warrant_t", "lme_offwarrant_data_date"], "lme_offwarrant_stale"),
         ("SHFE", lambda: _run_shfe(run_shfe_daily), SHFEScraperError,
-         ["shfe_on_warrant_t", "shfe_cancelled_t", "shfe_off_warrant_t", "shfe_total_t",
-          "shfe_data_date", "shfe_warrant_daily_t", "shfe_warrant_daily_date"], "shfe_stale"),
+         ["shfe_on_warrant_t", "shfe_cancelled_t", "shfe_unregistered_t", "shfe_off_warrant_t",
+          "shfe_total_t", "shfe_data_date", "shfe_warrant_daily_t",
+          "shfe_warrant_daily_date"], "shfe_stale"),
         ("PRICES", _run_prices, PriceScraperError, _PRICE_COLS, "price_stale"),
     ]
 
@@ -235,11 +241,13 @@ def _compute_totals(row: dict[str, Any], lme_closing_t: float | None) -> None:
     lme_can = _num(row.get("lme_cancelled_t"))
     lme_off = _num(row.get("lme_off_warrant_t"))
 
-    # Each exchange's *_total_t is the figure public trackers headline:
-    #   CME  -> TOTAL COPPER (Registered + Eligible)  [matches Reuters COMEX stocks]
-    #   LME  -> Closing Stock (live + cancelled)      [matches Westmetall / LME site]
-    #   SHFE -> 库存 physical inventory                [matches SMM]
-    # LME off-warrant (OWSR) is a SEPARATE figure that no "LME stock" quote includes.
+    # *_total_t = "reported stock" = exchange-monitored warehouse stock
+    #   = on_warrant + cancelled + unregistered
+    #   CME  -> Registered + Eligible          [matches Reuters COMEX stocks]
+    #   LME  -> Closing Stock (live + cancelled) [matches Westmetall / LME site]
+    #   SHFE -> 库存 physical inventory          [matches SMM]
+    # LME off-warrant (OWSR) is shadow inventory — off the warrant system — and is
+    # NOT part of any exchange's reported stock.
     row["lme_total_t"] = _round(
         lme_closing_t if lme_closing_t is not None else _add(lme_on, lme_can)
     )
@@ -249,14 +257,18 @@ def _compute_totals(row: dict[str, Any], lme_closing_t: float | None) -> None:
 
     row["global_on_warrant_t"] = _round(_add(_num(row.get("cme_on_warrant_t")), lme_on,
                                              _num(row.get("shfe_on_warrant_t"))))
+    # Cancelled warrants: LME only (CME / SHFE have no such mechanism).
     row["global_cancelled_t"] = _round(_add(_num(row.get("cme_cancelled_t")), lme_can,
                                             _num(row.get("shfe_cancelled_t"))))
-    # Off-warrant excludes SHFE (not reported).
-    row["global_off_warrant_t"] = _round(_add(_num(row.get("cme_off_warrant_t")), lme_off))
+    # Unregistered in-shed stock: CME Eligible + SHFE (库存 − 仓单). LME: none.
+    row["global_unregistered_t"] = _round(_add(_num(row.get("cme_unregistered_t")),
+                                               _num(row.get("shfe_unregistered_t"))))
+    # Off-warrant / shadow: LME OWSR only.
+    row["global_off_warrant_t"] = _round(lme_off)
 
-    # "Reported stock" = sum of each exchange's own headline figure.
+    # "Reported stock" = exchange-monitored warehouse stock (sum of *_total_t).
     row["global_reported_stock_t"] = _round(_add(cme_total, row["lme_total_t"], shfe_total))
-    # Grand total per spec = on-warrant + cancelled + off-warrant = reported + LME off-warrant.
+    # Grand total also counts LME off-warrant / shadow inventory.
     row["global_total_t"] = _round(_add(row["global_reported_stock_t"], lme_off))
 
 
@@ -338,13 +350,13 @@ def _fmt_summary(row: dict[str, Any]) -> str:
     return "\n".join([
         f"  run_date            {row['run_date']}   sources_ok={row['sources_ok'] or '-'}"
         f"  failed={row['sources_failed'] or '-'}",
-        f"  {'':16} {'on-warrant':>12} {'cancelled':>12} {'off-warrant':>12} {'reported*':>12}   as-of",
-        f"  CME              {g('cme_on_warrant_t')} {g('cme_cancelled_t')} {g('cme_off_warrant_t')} {g('cme_total_t')}   {row.get('cme_data_date')}",
-        f"  LME              {g('lme_on_warrant_t')} {g('lme_cancelled_t')} {g('lme_off_warrant_t')} {g('lme_total_t')}   {row.get('lme_warrant_data_date')} / {row.get('lme_offwarrant_data_date')}",
-        f"  SHFE             {g('shfe_on_warrant_t')} {g('shfe_cancelled_t')} {g('shfe_off_warrant_t')} {g('shfe_total_t')}   {row.get('shfe_data_date')}",
-        f"  {'GLOBAL':16} {g('global_on_warrant_t')} {g('global_cancelled_t')} {g('global_off_warrant_t')} {g('global_reported_stock_t')}",
-        f"  * reported = each exchange's headline figure; grand total incl. LME "
-        f"off-warrant = {g('global_total_t').strip()}",
+        f"  {'':7} {'on-warrant':>12} {'cancelled':>12} {'unregistrd':>12} {'shadow':>12} {'reported*':>12}   as-of",
+        f"  CME    {g('cme_on_warrant_t')} {g('cme_cancelled_t')} {g('cme_unregistered_t')} {g('cme_off_warrant_t')} {g('cme_total_t')}   {row.get('cme_data_date')}",
+        f"  LME    {g('lme_on_warrant_t')} {g('lme_cancelled_t')} {g('lme_unregistered_t')} {g('lme_off_warrant_t')} {g('lme_total_t')}   {row.get('lme_warrant_data_date')} / {row.get('lme_offwarrant_data_date')}",
+        f"  SHFE   {g('shfe_on_warrant_t')} {g('shfe_cancelled_t')} {g('shfe_unregistered_t')} {g('shfe_off_warrant_t')} {g('shfe_total_t')}   {row.get('shfe_data_date')}",
+        f"  GLOBAL {g('global_on_warrant_t')} {g('global_cancelled_t')} {g('global_unregistered_t')} {g('global_off_warrant_t')} {g('global_reported_stock_t')}",
+        f"  * reported stock = on-warrant + cancelled + unregistered (exchange-monitored "
+        f"warehouses); grand total incl. LME shadow/off-warrant = {g('global_total_t').strip()}",
         f"  price  COMEX {g('comex_copper_usd_t').strip()} USD/t  LME cash "
         f"{g('lme_copper_cash_usd_t').strip()} USD/t  ->  CME-LME spread "
         f"{g('cme_lme_spread_usd_t').strip()} USD/t"
