@@ -162,28 +162,38 @@ for col, b in zip(k[1:], BUCKETS):
 st.divider()
 
 # --------------------------------------------------------------------------- #
-# Charts
+# Charts — one stacked bar per date the picture actually changed (a source
+# published), not one per forward-filled day. String-dated x-axis = no time,
+# equal-width bars, no weekend gaps (series is already business-day).
 # --------------------------------------------------------------------------- #
+def change_point_bars(cols_df: pd.DataFrame) -> pd.DataFrame:
+    changed = cols_df.fillna(-1.0).ne(cols_df.fillna(-1.0).shift()).any(axis=1)
+    out = cols_df.loc[changed].copy()
+    out.index = out.index.strftime("%Y-%m-%d")
+    return out
+
+
+x_label = "report as-of date" if timeline == "Report as-of date" else "pipeline run date"
 left, right = st.columns(2)
 
 with left:
     st.subheader("Global composition by date")
     comp = series[[f"global_{b}_t" for b in BUCKETS]] / unit_div
     comp.columns = [BUCKET_LABELS[b] for b in BUCKETS]
-    # One bar per date the picture actually changed (i.e. a source published new
-    # data) — not one per forward-filled calendar day.
-    changed = comp.fillna(-1.0).ne(comp.fillna(-1.0).shift()).any(axis=1)
-    bars = comp.loc[changed].copy()
-    bars.index = bars.index.strftime("%Y-%m-%d")
-    x_label = "report as-of date" if timeline == "Report as-of date" else "pipeline run date"
-    st.bar_chart(bars, height=340, stack=True, y_label=unit_suffix, x_label=x_label)
+    st.bar_chart(
+        change_point_bars(comp), height=340, stack=True,
+        y_label=unit_suffix, x_label=x_label,
+    )
 
 with right:
     st.subheader("Total by exchange")
     cols = [f"{e}_total_t" for e in show_exchanges] or [f"{e}_total_t" for e in EXCHANGES]
     byx = series[cols] / unit_div
     byx.columns = [EXCHANGE_LABELS[c.split("_")[0]] for c in cols]
-    st.line_chart(byx, height=340, y_label=unit_suffix)
+    st.bar_chart(
+        change_point_bars(byx), height=340, stack=True,
+        y_label=unit_suffix, x_label=x_label,
+    )
 
 st.subheader("Per-exchange breakdown (latest)")
 rows = []

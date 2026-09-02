@@ -50,13 +50,15 @@ def build_daily_series(
     *,
     end: dt.date | None = None,
     columns: list[str] | None = None,
+    freq: str = "B",
 ) -> pd.DataFrame:
-    """Reindex the run log to a continuous daily calendar and forward-fill.
+    """Reindex the run log to a business-day calendar and forward-fill.
 
     Satisfies the spec's "forward-fill (LOCF) any missing days due to regional
-    holidays". Index is a daily ``DatetimeIndex`` from the first run to ``end``
-    (default: today). Numeric value columns are filled; ``*_data_date`` and
-    ``*_stale`` columns are carried forward too so staleness stays visible.
+    holidays". ``freq`` defaults to ``"B"`` (Mon-Fri) so weekends never appear on
+    charts; pass ``"D"`` for a true every-day index. Numeric value columns are
+    filled; ``*_data_date`` and ``*_stale`` columns are carried forward too so
+    staleness stays visible.
     """
     if df.empty:
         return df.copy()
@@ -65,7 +67,7 @@ def build_daily_series(
     work = work.sort_values("run_date").set_index("run_date")
 
     end_ts = pd.Timestamp(end or dt.date.today())
-    calendar = pd.date_range(work.index.min(), max(work.index.max(), end_ts), freq="D")
+    calendar = pd.date_range(work.index.min(), max(work.index.max(), end_ts), freq=freq)
 
     cols = columns or [
         c for c in work.columns
@@ -76,7 +78,9 @@ def build_daily_series(
     return out.reset_index()
 
 
-def build_asof_series(df: pd.DataFrame, *, end: dt.date | None = None) -> pd.DataFrame:
+def build_asof_series(
+    df: pd.DataFrame, *, end: dt.date | None = None, freq: str = "B"
+) -> pd.DataFrame:
     """Daily series indexed by each exchange's **report as-of date**, not run date.
 
     Every exchange is placed on the timeline at the date its report is *for*
@@ -114,7 +118,7 @@ def build_asof_series(df: pd.DataFrame, *, end: dt.date | None = None) -> pd.Dat
         return pd.DataFrame(columns=["date"])
 
     last = max([f[0].index.max() for f in frames.values()] + [end_ts])
-    calendar = pd.date_range(min(starts), last, freq="D")
+    calendar = pd.date_range(min(starts), last, freq=freq)
     out = pd.DataFrame(index=calendar)
     out.index.name = "date"
     # Always emit every value column (NaN if that exchange has no data yet), so

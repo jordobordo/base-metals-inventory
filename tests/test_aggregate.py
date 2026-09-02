@@ -149,14 +149,16 @@ def test_parquet_upsert_and_locf(monkeypatch) -> None:
         df = agg.upsert_parquet(r2, pq)
         assert len(df) == 2
 
+        # default freq="B": weekends (09-05 Sat, 09-06 Sun) are excluded
         daily = agg.build_daily_series(df, end=dt.date(2026, 9, 6))
-        # continuous calendar 09-01 .. 09-06
-        assert list(daily["date"]) == list(pd.date_range("2026-09-01", "2026-09-06", freq="D"))
-        # 09-02/09-03 forward-filled from 09-01; 09-05/09-06 from 09-04
+        assert list(daily["date"]) == list(pd.date_range("2026-09-01", "2026-09-06", freq="B"))
         v = daily.set_index("date")["global_total_t"]
-        assert v.loc["2026-09-03"] == 999_999.0
-        assert v.loc["2026-09-05"] == 1_000_000.0
-        assert v.loc["2026-09-06"] == 1_000_000.0
+        assert v.loc["2026-09-03"] == 999_999.0   # Thu, ffilled from Tue 09-01
+        assert v.loc["2026-09-04"] == 1_000_000.0  # Fri, the 09-04 run
+        # freq="D" still available for a true every-day index
+        every = agg.build_daily_series(df, end=dt.date(2026, 9, 6), freq="D")
+        assert list(every["date"]) == list(pd.date_range("2026-09-01", "2026-09-06", freq="D"))
+        assert every.set_index("date")["global_total_t"].loc["2026-09-06"] == 1_000_000.0
         print("test_parquet_upsert_and_locf: OK")
 
 
