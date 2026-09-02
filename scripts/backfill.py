@@ -140,8 +140,11 @@ def shfe_points(weeks: int = 4) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Assemble
 # --------------------------------------------------------------------------- #
-def _nearest(points: list[dict[str, Any]], on: dt.date) -> dict[str, Any] | None:
+def _nearest(points: list[dict[str, Any]], on: dt.date,
+             max_age_days: int | None = None) -> dict[str, Any] | None:
     prior = [p for p in points if p["data_date"] <= on]
+    if max_age_days is not None:
+        prior = [p for p in prior if (on - p["data_date"]).days <= max_age_days]
     return max(prior, key=lambda p: p["data_date"]) if prior else None
 
 
@@ -153,7 +156,15 @@ def build_rows() -> list[dict[str, Any]]:
     log.info("history: CME %d, LME %d, OWSR %d, SHFE %d points",
              len(cme), len(lme), len(owsr), len(shfe))
 
-    dates = sorted({p["data_date"] for src in (cme, lme, owsr, shfe) for p in src})
+    # Only build rows from the earliest date where CME *or* LME has data — don't
+    # emit SHFE-only orphan rows weeks before the other sources start.
+    anchors = [src[0]["data_date"] for src in (cme, lme) if src]
+    if not anchors:
+        return []
+    start = min(anchors)
+    dates = sorted(
+        d for d in {p["data_date"] for src in (cme, lme, owsr, shfe) for p in src} if d >= start
+    )
     rows: list[dict[str, Any]] = []
     for d in dates:
         row: dict[str, Any] = {k: None for k in SCHEMA}
@@ -182,7 +193,7 @@ def build_rows() -> list[dict[str, Any]]:
         if op:
             row.update(lme_off_warrant_t=op["off_warrant"], lme_offwarrant_data_date=op["data_date"])
 
-        sp = _nearest(shfe, d)
+        sp = _nearest(shfe, d, max_age_days=10)  # SHFE weekly — don't stretch a point >10d
         if sp:
             row.update(shfe_on_warrant_t=sp["warrant"], shfe_cancelled_t=sp["unregistered"],
                        shfe_off_warrant_t=float("nan"),

@@ -133,7 +133,12 @@ def dod(col: str) -> tuple[float | None, float | None]:
     if pd.isna(cur) or prv is None or pd.isna(prv):
         return None, None
     d = float(cur) - float(prv)
-    pct = (d / float(prv) * 100.0) if float(prv) != 0 else None
+    if d == 0:
+        pct = 0.0                              # unchanged -> +0.0%, even from a zero base
+    elif float(prv) != 0:
+        pct = d / float(prv) * 100.0
+    else:
+        pct = None                            # moved off a zero base -> % undefined
     return d, pct
 
 
@@ -276,17 +281,6 @@ for e in EXCHANGES:
 bt = pd.DataFrame(rows).set_index("Exchange")
 _bt_groups = [(m, [f"{m} ({unit_suffix})", f"{m} Δ"]) for m, _ in _BUCKET_COLS]
 st.table(styled_table(bt, _bt_groups, {f"{m} ({unit_suffix})": "{:,.0f}" for m, _ in _BUCKET_COLS}))
-st.caption(
-    "**Reported stock** = each exchange's headline figure: CME = Registered + "
-    "Eligible; LME = on-warrant (live + cancelled); SHFE = 库存. Off-warrant is a "
-    "separate figure only LME publishes — *not* in LME's reported stock, but *is* "
-    "in `global_total_t`. SHFE *Cancelled* is the implied non-warranted portion "
-    "(库存 − 仓单). "
-    f"Values in {unit}; **Δ is in tonnes** (latest run vs previous), % in brackets. "
-    f"SHFE daily warrant (side feed): "
-    f"{fmt(latest.get('shfe_warrant_daily_t'), unit_div, unit_suffix)} @ "
-    f"{pd.to_datetime(latest.get('shfe_warrant_daily_date')).date() if pd.notna(latest.get('shfe_warrant_daily_date')) else 'n/a'}."
-)
 
 st.divider()
 
