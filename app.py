@@ -41,8 +41,18 @@ st.set_page_config(
 )
 
 
-@st.cache_data(ttl=1800)
-def load_runs() -> pd.DataFrame:
+def _parquet_token() -> float:
+    try:
+        return DATA_PATH.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+@st.cache_data(ttl=300)
+def load_runs(token: float) -> pd.DataFrame:
+    # `token` = parquet mtime (hashed into the cache key) — a new value busts the
+    # cache the moment the file changes, without waiting for the TTL.
+    _ = token
     if not DATA_PATH.exists():
         return pd.DataFrame()
     df = pd.read_parquet(DATA_PATH)
@@ -56,7 +66,7 @@ def fmt(value: float | None, unit_div: float, suffix: str) -> str:
     return f"{value / unit_div:,.0f} {suffix}"
 
 
-runs = load_runs()
+runs = load_runs(_parquet_token())
 
 st.title("🟠 Global Copper Warehouse Inventory")
 
@@ -329,8 +339,30 @@ with st.expander("Data health & raw run log"):
     st.dataframe(log, width="stretch", hide_index=True)
     st.caption(f"{len(runs)} pipeline runs on record · parquet: `{DATA_PATH.name}`")
 
+with st.expander("Sources"):
+    st.markdown(
+        """
+**CME (COMEX)**
+- Copper warehouse stocks — [`Copper_Stocks.xls`](https://www.cmegroup.com/delivery_reports/Copper_Stocks.xls) (Registered / Eligible)
+- Copper futures settlements — [copper.settlements.html](https://www.cmegroup.com/markets/metals/base/copper.settlements.html) (most-active month settle, price leg)
+- NYMEX & COMEX Delivery Notices — [nymex-delivery-notices](https://www.cmegroup.com/solutions/clearing/operations-and-deliveries/nymex-delivery-notices.html) (reference)
+
+**LME**
+- Stock breakdown report — [stock-breakdown-report](https://www.lme.com/market-data/reports-and-data/warehouse-and-stocks-reports/stock-breakdown-report?page=1&DateFacet=Last+7+days) (live + cancelled warrants)
+- Off-warrant stock reporting — [off-warrant-stock-reporting](https://www.lme.com/market-data/reports-and-data/warehouse-and-stocks-reports/off-warrant-stock-reporting?page=1&DateFacet=Last+7+days)
+- LME Copper prices — [lme-copper](https://www.lme.com/en/metals/non-ferrous/lme-copper) (day-delayed Closing 3-month + Official cash)
+- Westmetall — [markdaten.php](https://www.westmetall.com/en/markdaten.php?action=table&field=LME_Cu_cash) (LME price fallback)
+
+**SHFE**
+- Weekly stock report / 库存周报 — [WeeklyData](https://www.shfe.com.cn/eng/reports/StatisticalData/WeeklyData/?query_params=weeklystock)
+- Daily warehouse-warrant report / 仓单日报 — [DailyData](https://www.shfe.com.cn/eng/reports/StatisticalData/DailyData/?query_params=dailystock)
+
+**Prices (fallback)**
+- Yahoo Finance — [`HG=F`](https://finance.yahoo.com/quote/HG=F) (COMEX copper, continuous front-month)
+        """
+    )
+
 st.caption(
-    f"Generated {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M UTC} · "
-    "source reports: LME stock-breakdown (T+2) + OWSR (T+3), CME Copper_Stocks (T+1), "
-    "SHFE weekly stock report."
+    f"Generated {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M UTC}. "
+    "Report lags: CME ~T+1, LME stock-breakdown ~T+2, LME OWSR ~T+3, SHFE weekly = last Friday."
 )
