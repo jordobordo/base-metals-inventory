@@ -195,13 +195,20 @@ _BUCKET_COLS = [
 ]
 
 
-def _dod_cell(col: str, *, usd: bool = False) -> str:
-    """DoD change of `col` with the % change in brackets. Tonnes, or USD/t."""
+def _dod_cell(col: str) -> str:
+    """DoD change of `col` in tonnes with the % change in brackets (table cell)."""
     d, pct = dod(col)
     if d is None:
         return "—"
-    unit = " USD/t" if usd else " t"
-    return f"{d:+,.0f}{unit}" + (f"  ({pct:+.1f}%)" if pct is not None else "")
+    return f"{d:+,.0f} t" + (f"  ({pct:+.1f}%)" if pct is not None else "")
+
+
+def usd_delta(col: str) -> str | None:
+    """st.metric-style delta string in USD/t (None when there's no prior run)."""
+    d, pct = dod(col)
+    if d is None:
+        return None
+    return f"{d:+,.0f} USD/t" + (f"  ({pct:+.1f}%)" if pct is not None else "")
 
 
 # gentle tints per stock type: (cell background, header background)
@@ -274,16 +281,13 @@ st.divider()
 st.subheader("CME (COMEX) − LME copper price spread")
 
 if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
-    prows = [
-        {"": "CME − LME (3-month)", "USD/t": latest.get("cme_lme_spread_3m_usd_t"),
-         "Δ": _dod_cell("cme_lme_spread_3m_usd_t", usd=True)},
-        {"": "CME price (COMEX front, MoC)", "USD/t": latest.get("comex_copper_usd_t"),
-         "Δ": _dod_cell("comex_copper_usd_t", usd=True)},
-        {"": "LME price (3-month, MoC)", "USD/t": latest.get("lme_copper_3m_usd_t"),
-         "Δ": _dod_cell("lme_copper_3m_usd_t", usd=True)},
-    ]
-    pt = pd.DataFrame(prows).set_index("")
-    st.table(styled_table(pt, [("_plain", ["USD/t", "Δ"])], {"USD/t": "{:,.0f}"}))
+    p = st.columns(3)
+    p[0].metric("CME − LME (3-month)", f"{latest['cme_lme_spread_3m_usd_t']:+,.0f} USD/t",
+                usd_delta("cme_lme_spread_3m_usd_t"))
+    p[1].metric("CME price (COMEX front)",
+                f"{latest['comex_copper_usd_t']:,.0f} USD/t", usd_delta("comex_copper_usd_t"))
+    p[2].metric("LME price (3-month)",
+                f"{latest['lme_copper_3m_usd_t']:,.0f} USD/t", usd_delta("lme_copper_3m_usd_t"))
 
     cpx_d, lme_d = latest.get("comex_price_date"), latest.get("lme_price_date")
     st.caption(
