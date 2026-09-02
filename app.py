@@ -167,10 +167,16 @@ st.divider()
 left, right = st.columns(2)
 
 with left:
-    st.subheader("Global composition over time")
+    st.subheader("Global composition by date")
     comp = series[[f"global_{b}_t" for b in BUCKETS]] / unit_div
     comp.columns = [BUCKET_LABELS[b] for b in BUCKETS]
-    st.area_chart(comp, height=340, y_label=unit_suffix)
+    # One bar per date the picture actually changed (i.e. a source published new
+    # data) — not one per forward-filled calendar day.
+    changed = comp.fillna(-1.0).ne(comp.fillna(-1.0).shift()).any(axis=1)
+    bars = comp.loc[changed].copy()
+    bars.index = bars.index.strftime("%Y-%m-%d")
+    x_label = "report as-of date" if timeline == "Report as-of date" else "pipeline run date"
+    st.bar_chart(bars, height=340, stack=True, y_label=unit_suffix, x_label=x_label)
 
 with right:
     st.subheader("Total by exchange")
