@@ -182,12 +182,12 @@ def test_asof_series(monkeypatch) -> None:
 
     _patch_all(monkeypatch)
     row = agg.collect()
-    row["run_date"] = dt.date(2026, 9, 2)
+    row["run_date"] = dt.date(2026, 8, 26)  # a backfill-style row so run_floor == 08-26
     df = agg._row_to_frame(row)
 
     a = build_asof_series(df, end=dt.date(2026, 9, 2)).set_index("date")
     # fixture as-of dates: LME warrant 08-26, CME 08-28, SHFE weekly 08-28
-    assert a.index.min() == pd.Timestamp("2026-08-26")  # earliest = LME
+    assert a.index.min() == pd.Timestamp("2026-08-26")  # earliest = LME / run_floor
     assert a.index.max() == pd.Timestamp("2026-09-02")
     # bfill: CME/SHFE's earliest value extends back to the start (no "spike")
     assert a.loc["2026-08-27", "cme_total_t"] == round(758_889.0 * CONV, 3)

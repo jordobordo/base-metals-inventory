@@ -46,6 +46,7 @@ from scripts.shfe_scraper import fetch_shfe_weekly_stock_html, parse_shfe_weekly
 log = logging.getLogger("backfill")
 
 _RE_NUM_COLS = (2, 7)  # PREV TOTAL, TOTAL TODAY in the CME grand-total rows
+BACKFILL_FLOOR = dt.date(2026, 8, 28)  # don't synthesise rows before this date
 
 
 def _prev_business_day(d: dt.date) -> dt.date:
@@ -156,12 +157,12 @@ def build_rows() -> list[dict[str, Any]]:
     log.info("history: CME %d, LME %d, OWSR %d, SHFE %d points",
              len(cme), len(lme), len(owsr), len(shfe))
 
-    # Only build rows from the earliest date where CME *or* LME has data — don't
-    # emit SHFE-only orphan rows weeks before the other sources start.
+    # Build rows only from BACKFILL_FLOOR (or the first CME/LME date, whichever is
+    # later) — no SHFE-only orphan rows before the other sources start.
     anchors = [src[0]["data_date"] for src in (cme, lme) if src]
     if not anchors:
         return []
-    start = min(anchors)
+    start = max(min(anchors), BACKFILL_FLOOR)
     dates = sorted(
         d for d in {p["data_date"] for src in (cme, lme, owsr, shfe) for p in src} if d >= start
     )
@@ -193,7 +194,7 @@ def build_rows() -> list[dict[str, Any]]:
         if op:
             row.update(lme_off_warrant_t=op["off_warrant"], lme_offwarrant_data_date=op["data_date"])
 
-        sp = _nearest(shfe, d, max_age_days=10)  # SHFE weekly — don't stretch a point >10d
+        sp = _nearest(shfe, d, max_age_days=6)  # SHFE weekly — a point only fills its own week
         if sp:
             row.update(shfe_on_warrant_t=sp["warrant"], shfe_cancelled_t=sp["unregistered"],
                        shfe_off_warrant_t=float("nan"),

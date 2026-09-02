@@ -120,6 +120,10 @@ with st.sidebar:
 latest = runs.iloc[-1]
 prev = runs.iloc[-2] if len(runs) > 1 else None
 
+# Business-day, forward-filled series — used for day-over-day so "T-1" is always
+# the previous business day, regardless of gaps between pipeline-run rows.
+_dod_series = build_asof_series(runs).set_index("date")
+
 
 def _asof(e: str):
     v = latest.get(EXCHANGE_DATE_COL[e])
@@ -127,10 +131,16 @@ def _asof(e: str):
 
 
 def dod(col: str) -> tuple[float | None, float | None]:
-    """Day-over-day absolute + % change of `col` (latest run vs previous run)."""
-    cur = latest.get(col)
-    prv = prev.get(col) if prev is not None else None
-    if pd.isna(cur) or prv is None or pd.isna(prv):
+    """Absolute + % change of `col`: latest date vs T-1 (previous business day).
+
+    Uses the forward-filled as-of series; falls back to the last two run rows for
+    columns it doesn't carry (e.g. the price legs)."""
+    if col in _dod_series.columns and len(_dod_series) >= 2:
+        cur, prv = _dod_series[col].iloc[-1], _dod_series[col].iloc[-2]
+    else:
+        cur = latest.get(col)
+        prv = prev.get(col) if prev is not None else None
+    if prv is None or pd.isna(cur) or pd.isna(prv):
         return None, None
     d = float(cur) - float(prv)
     if d == 0:

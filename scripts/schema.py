@@ -122,8 +122,12 @@ def build_asof_series(
     if not starts:
         return pd.DataFrame(columns=["date"])
 
+    # Chart starts at the first *pipeline run*, not at an old report date a run
+    # happened to carry (e.g. last week's SHFE weekly on a Wednesday row).
+    run_floor = pd.to_datetime(runs["run_date"]).min()
+    cal_start = max(min(starts), run_floor)
     last = max([f[0].index.max() for f in frames.values()] + [end_ts])
-    calendar = pd.date_range(min(starts), last, freq=freq)
+    calendar = pd.date_range(cal_start, last, freq=freq)
     out = pd.DataFrame(index=calendar)
     out.index.name = "date"
     # Always emit every value column (NaN if that exchange has no data yet), so
@@ -132,10 +136,11 @@ def build_asof_series(
         for c in vcols:
             out[c] = float("nan")
     for _ex, (sub, have) in frames.items():
-        # ffill forward from each exchange's first report; bfill its earliest
-        # value back to the series start so a later-starting source (e.g. CME's
-        # T+1 date) doesn't create a step-up "spike" when it first appears.
-        filled = sub.reindex(calendar).ffill().bfill()
+        # ffill from each report date (including any before cal_start), then bfill
+        # so a later-starting source doesn't create a step-up "spike" when it
+        # first appears; finally clip to the visible calendar.
+        full_idx = calendar.union(sub.index)
+        filled = sub.reindex(full_idx).ffill().bfill().reindex(calendar)
         for c in have:
             out[c] = filled[c]
 
