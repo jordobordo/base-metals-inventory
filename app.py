@@ -194,52 +194,45 @@ with right:
 
 st.subheader("Breakdown & day-over-day change")
 
-
-def _metric_rows(group_label, col_map, asof):
-    for mlabel, col in col_map:
-        cur = latest.get(col)
-        d, pct = dod(col)
-        yield {
-            "": group_label,
-            "Metric": mlabel,
-            f"Value ({unit_suffix})": float(cur) / unit_div if pd.notna(cur) else None,
-            f"DoD Δ ({unit_suffix})": d / unit_div if d is not None else None,
-            "DoD Δ %": pct,
-            "As of": asof,
-        }
+_BUCKET_COLS = [
+    ("On-warrant", "on_warrant_t"),
+    ("Cancelled", "cancelled_t"),
+    ("Off-warrant", "off_warrant_t"),
+    ("Reported stock", "total_t"),
+]
 
 
-tbl = []
+def _dod_cell(col: str) -> str:
+    """DoD change of `col` in tonnes with the % change in brackets."""
+    d, pct = dod(col)
+    if d is None:
+        return "—"
+    return f"{d:+,.0f} t" + (f"  ({pct:+.1f}%)" if pct is not None else "")
+
+
+rows = []
 for e in EXCHANGES:
-    tbl += _metric_rows(EXCHANGE_LABELS[e], [
-        ("On-warrant", f"{e}_on_warrant_t"),
-        ("Cancelled", f"{e}_cancelled_t"),
-        ("Off-warrant", f"{e}_off_warrant_t"),
-        ("Reported stock", f"{e}_total_t"),
-    ], _asof(e))
-tbl += _metric_rows("GLOBAL", [
-    ("On-warrant", "global_on_warrant_t"),
-    ("Cancelled", "global_cancelled_t"),
-    ("Off-warrant", "global_off_warrant_t"),
-    ("Reported stock", "global_reported_stock_t"),
-    ("Grand total (incl. LME off-warrant)", "global_total_t"),
-], None)
-bt = pd.DataFrame(tbl)
+    row: dict[str, object] = {"Exchange": EXCHANGE_LABELS[e]}
+    for mlabel, msuf in _BUCKET_COLS:
+        col = f"{e}_{msuf}"
+        cur = latest.get(col)
+        row[f"{mlabel} ({unit_suffix})"] = float(cur) / unit_div if pd.notna(cur) else None
+        row[f"{mlabel} · DoD Δ"] = _dod_cell(col)
+    row["As of"] = _asof(e)
+    rows.append(row)
+
+bt = pd.DataFrame(rows).set_index("Exchange")
 st.dataframe(
-    bt.style.format({
-        f"Value ({unit_suffix})": "{:,.0f}",
-        f"DoD Δ ({unit_suffix})": "{:+,.0f}",
-        "DoD Δ %": "{:+.1f}%",
-    }, na_rep="—"),
-    width="stretch", hide_index=True,
+    bt.style.format({f"{m} ({unit_suffix})": "{:,.0f}" for m, _ in _BUCKET_COLS}, na_rep="—"),
+    width="stretch",
 )
 st.caption(
     "**Reported stock** = each exchange's headline figure: CME = Registered + "
     "Eligible; LME = on-warrant (live + cancelled); SHFE = 库存. Off-warrant is a "
-    "separate figure only LME publishes — it is *not* in LME's reported stock but "
-    "*is* in the global grand total. SHFE *Cancelled* is the implied non-warranted "
-    f"portion (库存 − 仓单). DoD = latest pipeline run vs the previous run. "
-    f"SHFE daily warrant (side feed): "
+    "separate figure only LME publishes — *not* in LME's reported stock, but *is* "
+    "in the global grand total above. SHFE *Cancelled* is the implied non-warranted "
+    "portion (库存 − 仓单). **DoD Δ is in tonnes** (latest run vs previous run), "
+    f"% change in brackets. SHFE daily warrant (side feed): "
     f"{fmt(latest.get('shfe_warrant_daily_t'), unit_div, unit_suffix)} @ "
     f"{pd.to_datetime(latest.get('shfe_warrant_daily_date')).date() if pd.notna(latest.get('shfe_warrant_daily_date')) else 'n/a'}."
 )
