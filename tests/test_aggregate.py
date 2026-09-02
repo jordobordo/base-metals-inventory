@@ -76,40 +76,32 @@ def test_harmonisation_and_global_total(monkeypatch) -> None:
     _patch_all(monkeypatch)
     row = agg.collect()
 
-    # CME: Registered = on-warrant, Eligible = unregistered (NOT off-warrant),
-    # cancelled 0, off-warrant NaN (COMEX reports no shadow stock)
     assert row["cme_on_warrant_t"] == round(477_482.0 * CONV, 3)
     assert row["cme_cancelled_t"] == 0.0
-    assert row["cme_unregistered_t"] == round(281_407.0 * CONV, 3)
-    assert pd.isna(row["cme_off_warrant_t"])
+    assert row["cme_off_warrant_t"] == round(281_407.0 * CONV, 3)
     assert row["cme_total_t"] == round(758_889.0 * CONV, 3)
 
     assert row["lme_on_warrant_t"] == 107_050.0
     assert row["lme_cancelled_t"] == 128_525.0
-    assert row["lme_off_warrant_t"] == 117_155.0        # OWSR — shadow
+    assert row["lme_off_warrant_t"] == 117_155.0
     assert row["lme_total_t"] == 235_575.0              # closing (live + cancelled)
 
-    # SHFE: 库存−仓单 is "unregistered", NOT "cancelled"; cancelled = 0
     assert row["shfe_on_warrant_t"] == 31_462.0
-    assert row["shfe_cancelled_t"] == 0.0
-    assert row["shfe_unregistered_t"] == 40_966.0
+    assert row["shfe_cancelled_t"] == 40_966.0          # implied non-warranted (库存 − 仓单)
     assert pd.isna(row["shfe_off_warrant_t"])
     assert row["shfe_total_t"] == 72_428.0
 
     # global buckets
     assert row["global_on_warrant_t"] == round(477_482.0 * CONV + 107_050.0 + 31_462.0, 3)
-    assert row["global_cancelled_t"] == 128_525.0                       # LME only
-    assert row["global_unregistered_t"] == round(281_407.0 * CONV + 40_966.0, 3)
-    assert row["global_off_warrant_t"] == 117_155.0                     # LME OWSR only
+    assert row["global_cancelled_t"] == round(0.0 + 128_525.0 + 40_966.0, 3)
+    assert row["global_off_warrant_t"] == round(281_407.0 * CONV + 117_155.0, 3)  # no SHFE
     assert row["global_reported_stock_t"] == round(
         row["cme_total_t"] + 235_575.0 + 72_428.0, 3
     )
     assert row["global_total_t"] == round(row["global_reported_stock_t"] + 117_155.0, 3)
-    # buckets reconcile to the grand total
     assert abs(
         row["global_total_t"]
-        - (row["global_on_warrant_t"] + row["global_cancelled_t"]
-           + row["global_unregistered_t"] + row["global_off_warrant_t"])
+        - (row["global_on_warrant_t"] + row["global_cancelled_t"] + row["global_off_warrant_t"])
     ) < 1.0
     assert row["sources_ok"] == "CME,LME,LME_OWSR,SHFE,PRICES"
 

@@ -11,30 +11,19 @@ import datetime as dt
 import pandas as pd
 
 # Column order for the stored parquet row. Keep stable — the dashboard depends on it.
-#
-# Inventory taxonomy (per exchange), all metric tonnes:
-#   on_warrant   registered / pledged / deliverable against the contract
-#   cancelled    warranted metal earmarked for withdrawal (a load-out queue) —
-#                LME only; CME and SHFE have no such mechanism (0)
-#   unregistered spec metal inside an exchange-monitored warehouse, not on warrant,
-#                no withdrawal queue — CME "Eligible" and SHFE (库存 − 仓单)
-#   off_warrant  shadow inventory off the exchange warrant system (LME OWSR only)
-#   *_total_t    = "reported stock" = on_warrant + cancelled + unregistered
-#                  (all metal in exchange-monitored warehouses — consistent across
-#                   the three exchanges; excludes off_warrant / shadow)
 SCHEMA: list[str] = [
     "run_date", "retrieved_at",
     # CME (converted to tonnes; raw short tons kept for audit)
-    "cme_on_warrant_t", "cme_cancelled_t", "cme_unregistered_t", "cme_off_warrant_t", "cme_total_t",
+    "cme_on_warrant_t", "cme_cancelled_t", "cme_off_warrant_t", "cme_total_t",
     "cme_data_date", "cme_stale", "cme_registered_short_tons", "cme_eligible_short_tons",
     # LME
-    "lme_on_warrant_t", "lme_cancelled_t", "lme_unregistered_t", "lme_off_warrant_t", "lme_total_t",
+    "lme_on_warrant_t", "lme_cancelled_t", "lme_off_warrant_t", "lme_total_t",
     "lme_warrant_data_date", "lme_offwarrant_data_date", "lme_stale", "lme_offwarrant_stale",
     # SHFE (weekly backbone; daily warrant on the side)
-    "shfe_on_warrant_t", "shfe_cancelled_t", "shfe_unregistered_t", "shfe_off_warrant_t", "shfe_total_t",
+    "shfe_on_warrant_t", "shfe_cancelled_t", "shfe_off_warrant_t", "shfe_total_t",
     "shfe_data_date", "shfe_stale", "shfe_warrant_daily_t", "shfe_warrant_daily_date",
     # Global
-    "global_on_warrant_t", "global_cancelled_t", "global_unregistered_t", "global_off_warrant_t",
+    "global_on_warrant_t", "global_cancelled_t", "global_off_warrant_t",
     "global_reported_stock_t", "global_total_t",
     # Prices — CME (COMEX) vs LME copper, USD (previous completed session)
     "comex_copper_usd_lb", "comex_copper_usd_t", "comex_price_date", "comex_contract",
@@ -52,14 +41,11 @@ DATE_COLS: set[str] = {
 # Which column holds each exchange's report as-of date, and its value columns.
 ASOF_SPEC: dict[str, tuple[str, list[str]]] = {
     "cme": ("cme_data_date",
-            ["cme_on_warrant_t", "cme_cancelled_t", "cme_unregistered_t",
-             "cme_off_warrant_t", "cme_total_t"]),
+            ["cme_on_warrant_t", "cme_cancelled_t", "cme_off_warrant_t", "cme_total_t"]),
     "lme": ("lme_warrant_data_date",
-            ["lme_on_warrant_t", "lme_cancelled_t", "lme_unregistered_t",
-             "lme_off_warrant_t", "lme_total_t"]),
+            ["lme_on_warrant_t", "lme_cancelled_t", "lme_off_warrant_t", "lme_total_t"]),
     "shfe": ("shfe_data_date",
-             ["shfe_on_warrant_t", "shfe_cancelled_t", "shfe_unregistered_t",
-              "shfe_off_warrant_t", "shfe_total_t"]),
+             ["shfe_on_warrant_t", "shfe_cancelled_t", "shfe_off_warrant_t", "shfe_total_t"]),
 }
 EXCHANGE_DATE_COL: dict[str, str] = {ex: dcol for ex, (dcol, _) in ASOF_SPEC.items()}
 
@@ -161,11 +147,9 @@ def build_asof_series(
 
     out["global_on_warrant_t"] = _sum(["cme_on_warrant_t", "lme_on_warrant_t", "shfe_on_warrant_t"])
     out["global_cancelled_t"] = _sum(["cme_cancelled_t", "lme_cancelled_t", "shfe_cancelled_t"])
-    out["global_unregistered_t"] = _sum(["cme_unregistered_t", "shfe_unregistered_t"])  # LME: none
-    out["global_off_warrant_t"] = _sum(["lme_off_warrant_t"])  # shadow — LME OWSR only
-    # "Reported stock" = exchange-monitored warehouse stock = on + cancelled +
-    # unregistered = each exchange's *_total_t summed.
+    out["global_off_warrant_t"] = _sum(["cme_off_warrant_t", "lme_off_warrant_t"])  # SHFE: none
+    # Each *_total_t is that exchange's headline figure; "reported stock" sums them.
     out["global_reported_stock_t"] = _sum(["cme_total_t", "lme_total_t", "shfe_total_t"])
-    # Grand total also counts LME off-warrant / shadow inventory.
+    # Grand total per spec = reported stock + LME off-warrant.
     out["global_total_t"] = _sum(["cme_total_t", "lme_total_t", "shfe_total_t", "lme_off_warrant_t"])
     return out.reset_index()

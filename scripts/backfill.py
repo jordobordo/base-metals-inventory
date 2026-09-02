@@ -167,7 +167,7 @@ def build_rows() -> list[dict[str, Any]]:
             reg_t = c["registered_st"] * SHORT_TON_TO_TONNE
             elig_t = c["eligible_st"] * SHORT_TON_TO_TONNE
             row.update(cme_on_warrant_t=round(reg_t, 3), cme_cancelled_t=0.0,
-                       cme_unregistered_t=round(elig_t, 3), cme_off_warrant_t=float("nan"),
+                       cme_off_warrant_t=round(elig_t, 3),
                        cme_total_t=round(reg_t + elig_t, 3), cme_data_date=c["data_date"],
                        cme_registered_short_tons=c["registered_st"],
                        cme_eligible_short_tons=c["eligible_st"])
@@ -177,15 +177,15 @@ def build_rows() -> list[dict[str, Any]]:
         if lp:
             lclose = lp["closing"]
             row.update(lme_on_warrant_t=lp["live"], lme_cancelled_t=lp["cancelled"],
-                       lme_unregistered_t=0.0, lme_warrant_data_date=lp["data_date"])
+                       lme_warrant_data_date=lp["data_date"])
         op = _nearest(owsr, d)
         if op:
             row.update(lme_off_warrant_t=op["off_warrant"], lme_offwarrant_data_date=op["data_date"])
 
         sp = _nearest(shfe, d)
         if sp:
-            row.update(shfe_on_warrant_t=sp["warrant"], shfe_cancelled_t=0.0,
-                       shfe_unregistered_t=sp["unregistered"], shfe_off_warrant_t=float("nan"),
+            row.update(shfe_on_warrant_t=sp["warrant"], shfe_cancelled_t=sp["unregistered"],
+                       shfe_off_warrant_t=float("nan"),
                        shfe_total_t=sp["inventory"], shfe_data_date=sp["data_date"])
 
         _compute_totals(row, lclose)
