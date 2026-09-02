@@ -26,6 +26,7 @@ Data Architecture and Workflow
 | `scripts/cme_scraper.py`  | CME (COMEX) `Copper_Stocks.xls` — Registered / Eligible (short tons) |
 | `scripts/lme_scraper.py`  | LME stock-breakdown (live + cancelled warrants) + OWSR (off-warrant), via the reports JSON API behind Cloudflare (`curl_cffi`) |
 | `scripts/shfe_scraper.py` | SHFE weekly stock report (库存 + 仓单) + daily warrant report (side feed) |
+| `scripts/price_scraper.py`| COMEX copper (Yahoo `HG=F`, USD/lb) vs LME cash + 3-month (Westmetall, USD/t) → CME−LME spread in USD/t |
 | `scripts/aggregate.py`    | runs all scrapers, converts CME short tons ×0.907185, harmonises, computes the global total, upserts `data/copper_inventory.parquet` |
 | `scripts/schema.py`       | shared column schema + LOCF daily-calendar helper |
 | `app.py`                  | Streamlit dashboard |
@@ -102,3 +103,13 @@ file (e.g. the "28 Aug" file's 233,500 t shows as "01 Sep" on Westmetall).
   charting: `scripts/schema.build_daily_series` (x-axis = pipeline run date) and
   `build_asof_series` (x-axis = each report's own as-of date, staggered by lag —
   the dashboard default).
+
+### Price spread
+
+`comex_copper_usd_t` = Yahoo `HG=F` previous completed close (USD/lb) × 2204.62.
+`lme_copper_cash_usd_t` / `lme_copper_3m_usd_t` from the Westmetall table.
+`cme_lme_spread_usd_t` = COMEX − LME cash (positive = COMEX rich to LME);
+`cme_lme_spread_3m_usd_t` = COMEX − LME 3-month. `comex_price_date` /
+`lme_price_date` record which session each leg is from; the spread is only filled
+when both legs are present. Either leg can fail independently without failing the
+run.

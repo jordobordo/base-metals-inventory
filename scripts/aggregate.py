@@ -62,6 +62,7 @@ from scripts.lme_scraper import (  # noqa: E402
     get_lme_copper_offwarrant,
     get_lme_copper_warrants,
 )
+from scripts.price_scraper import PriceScraperError, get_cme_lme_copper_spread  # noqa: E402
 from scripts.schema import DATE_COLS, SCHEMA, build_daily_series  # noqa: E402,F401
 from scripts.shfe_scraper import SHFEScraperError, get_shfe_copper_stocks  # noqa: E402
 
@@ -128,6 +129,23 @@ def _run_shfe(enrich_with_daily: bool) -> dict[str, Any]:
     }
 
 
+_PRICE_COLS = [
+    "comex_copper_usd_lb", "comex_copper_usd_t", "comex_price_date",
+    "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_price_date",
+    "cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t",
+]
+
+
+def _run_prices() -> dict[str, Any]:
+    # Raises PriceScraperError only if BOTH legs fail (-> carried forward).
+    # A single failed leg just leaves that leg's columns None for this run.
+    rec = get_cme_lme_copper_spread()
+    if rec.get("price_legs_failed"):
+        log.warning("price: partial (%s ok, %s failed)",
+                    rec.get("price_legs_ok"), rec.get("price_legs_failed"))
+    return {c: rec.get(c) for c in _PRICE_COLS}
+
+
 # --------------------------------------------------------------------------- #
 # Aggregation
 # --------------------------------------------------------------------------- #
@@ -145,7 +163,8 @@ def collect(
     row: dict[str, Any] = {k: None for k in SCHEMA}
     row["run_date"] = dt.date.today()
     row["retrieved_at"] = dt.datetime.now(dt.timezone.utc)
-    row["cme_stale"] = row["lme_stale"] = row["lme_offwarrant_stale"] = row["shfe_stale"] = False
+    row["cme_stale"] = row["lme_stale"] = row["lme_offwarrant_stale"] = False
+    row["shfe_stale"] = row["price_stale"] = False
 
     ok: list[str] = []
     failed: list[str] = []
@@ -162,6 +181,7 @@ def collect(
         ("SHFE", lambda: _run_shfe(run_shfe_daily), SHFEScraperError,
          ["shfe_on_warrant_t", "shfe_cancelled_t", "shfe_off_warrant_t", "shfe_total_t",
           "shfe_data_date", "shfe_warrant_daily_t", "shfe_warrant_daily_date"], "shfe_stale"),
+        ("PRICES", _run_prices, PriceScraperError, _PRICE_COLS, "price_stale"),
     ]
 
     lme_closing_t: float | None = None
@@ -268,7 +288,7 @@ def _row_to_frame(row: dict[str, Any]) -> pd.DataFrame:
         df[c] = pd.to_datetime(df[c], errors="coerce")
     df["retrieved_at"] = pd.to_datetime(df["retrieved_at"], utc=True, errors="coerce")
     for c in df.columns:
-        if c.endswith("_t") or c.endswith("_short_tons"):
+        if c.endswith(("_t", "_short_tons", "_usd_lb")):
             df[c] = pd.to_numeric(df[c], errors="coerce")
         if c.endswith("_stale"):
             df[c] = df[c].astype("boolean")
@@ -325,6 +345,10 @@ def _fmt_summary(row: dict[str, Any]) -> str:
         f"  {'GLOBAL':16} {g('global_on_warrant_t')} {g('global_cancelled_t')} {g('global_off_warrant_t')} {g('global_reported_stock_t')}",
         f"  * reported = each exchange's headline figure; grand total incl. LME "
         f"off-warrant = {g('global_total_t').strip()}",
+        f"  price  COMEX {g('comex_copper_usd_t').strip()} USD/t  LME cash "
+        f"{g('lme_copper_cash_usd_t').strip()} USD/t  ->  CME-LME spread "
+        f"{g('cme_lme_spread_usd_t').strip()} USD/t"
+        f"   ({row.get('comex_price_date')} / {row.get('lme_price_date')})",
     ])
 
 

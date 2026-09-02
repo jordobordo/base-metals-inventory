@@ -59,7 +59,6 @@ def fmt(value: float | None, unit_div: float, suffix: str) -> str:
 runs = load_runs()
 
 st.title("🟠 Global Copper Warehouse Inventory")
-st.caption("LME + CME (COMEX) + SHFE · harmonised to metric tonnes · on-warrant / cancelled / off-warrant")
 
 if runs.empty:
     st.info(
@@ -149,12 +148,6 @@ for col, b in zip(k[1:], BUCKETS):
     col.metric(f"Global {BUCKET_LABELS[b].lower()}",
                fmt(latest.get(f"global_{b}_t"), unit_div, unit_suffix),
                delta_str(f"global_{b}_t"))
-st.caption(
-    f"Reported stock = each exchange's own headline figure (COMEX total, LME "
-    f"on-warrant, SHFE 库存). Grand total **incl. LME off-warrant** "
-    f"({fmt(latest.get('lme_off_warrant_t'), unit_div, unit_suffix)}): "
-    f"**{fmt(latest.get('global_total_t'), unit_div, unit_suffix)}**."
-)
 
 st.divider()
 
@@ -230,12 +223,63 @@ st.caption(
     "**Reported stock** = each exchange's headline figure: CME = Registered + "
     "Eligible; LME = on-warrant (live + cancelled); SHFE = 库存. Off-warrant is a "
     "separate figure only LME publishes — *not* in LME's reported stock, but *is* "
-    "in the global grand total above. SHFE *Cancelled* is the implied non-warranted "
-    "portion (库存 − 仓单). **DoD Δ is in tonnes** (latest run vs previous run), "
-    f"% change in brackets. SHFE daily warrant (side feed): "
+    "in `global_total_t`. SHFE *Cancelled* is the implied non-warranted portion "
+    "(库存 − 仓单). **DoD Δ is in tonnes** (latest run vs previous run), % change in "
+    f"brackets. SHFE daily warrant (side feed): "
     f"{fmt(latest.get('shfe_warrant_daily_t'), unit_div, unit_suffix)} @ "
     f"{pd.to_datetime(latest.get('shfe_warrant_daily_date')).date() if pd.notna(latest.get('shfe_warrant_daily_date')) else 'n/a'}."
 )
+
+st.divider()
+
+# --------------------------------------------------------------------------- #
+# CME (COMEX) - LME copper price spread
+# --------------------------------------------------------------------------- #
+st.subheader("CME (COMEX) − LME copper price spread")
+
+
+def usd_delta(col: str) -> str | None:
+    d, pct = dod(col)
+    if d is None:
+        return None
+    return f"{d:+,.0f} USD/t" + (f"  ({pct:+.1f}%)" if pct is not None else "")
+
+
+def usd(col: str) -> str:
+    v = latest.get(col)
+    return "—" if pd.isna(v) else f"{v:,.0f} USD/t"
+
+
+if pd.notna(latest.get("cme_lme_spread_usd_t")):
+    m = st.columns(4)
+    m[0].metric("CME − LME (cash)", f"{latest['cme_lme_spread_usd_t']:+,.0f} USD/t",
+                usd_delta("cme_lme_spread_usd_t"))
+    m[1].metric("CME − LME (3-month)",
+                f"{latest['cme_lme_spread_3m_usd_t']:+,.0f} USD/t"
+                if pd.notna(latest.get("cme_lme_spread_3m_usd_t")) else "—",
+                usd_delta("cme_lme_spread_3m_usd_t"))
+    m[2].metric("COMEX HG (front)", usd("comex_copper_usd_t"), usd_delta("comex_copper_usd_t"))
+    m[3].metric("LME cash", usd("lme_copper_cash_usd_t"), usd_delta("lme_copper_cash_usd_t"))
+
+    cpx_d = latest.get("comex_price_date")
+    lme_d = latest.get("lme_price_date")
+    st.caption(
+        f"COMEX HG=F {latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.62 lb/t "
+        f"− LME cash settlement. Prices as of "
+        f"{pd.to_datetime(cpx_d).date() if pd.notna(cpx_d) else 'n/a'} (COMEX) / "
+        f"{pd.to_datetime(lme_d).date() if pd.notna(lme_d) else 'n/a'} (LME). "
+        "Positive = COMEX above LME. Sources: Yahoo Finance, Westmetall."
+    )
+
+    _sp = build_daily_series(runs).set_index("date")
+    _sp = _sp[["cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t"]].dropna(how="all")
+    if not _sp.empty:
+        _sp = _sp.loc[_sp.fillna(-1e12).ne(_sp.fillna(-1e12).shift()).any(axis=1)]
+        _sp.columns = ["vs LME cash", "vs LME 3-month"]
+        _sp.index = _sp.index.strftime("%Y-%m-%d")
+        st.line_chart(_sp, height=300, y_label="USD/t", x_label="date")
+else:
+    st.info("No CME–LME price data yet — populates from the next pipeline run.")
 
 # --------------------------------------------------------------------------- #
 # Data health / raw log
@@ -243,9 +287,10 @@ st.caption(
 with st.expander("Data health & raw run log"):
     health_cols = [
         "run_date", "sources_ok", "sources_failed",
-        "cme_stale", "lme_stale", "lme_offwarrant_stale", "shfe_stale",
-        "global_total_t", "notes",
+        "cme_stale", "lme_stale", "lme_offwarrant_stale", "shfe_stale", "price_stale",
+        "global_total_t", "cme_lme_spread_usd_t", "notes",
     ]
+    health_cols = [c for c in health_cols if c in runs.columns]
     log = runs[health_cols].sort_values("run_date", ascending=False).head(30).copy()
     log["run_date"] = log["run_date"].dt.date
     st.dataframe(log, width="stretch", hide_index=True)

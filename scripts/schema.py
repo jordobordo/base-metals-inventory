@@ -25,13 +25,17 @@ SCHEMA: list[str] = [
     # Global
     "global_on_warrant_t", "global_cancelled_t", "global_off_warrant_t",
     "global_reported_stock_t", "global_total_t",
+    # Prices — CME (COMEX) vs LME copper, USD (previous completed session)
+    "comex_copper_usd_lb", "comex_copper_usd_t", "comex_price_date",
+    "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_price_date",
+    "cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t", "price_stale",
     # Provenance
     "sources_ok", "sources_failed", "notes",
 ]
 
 DATE_COLS: set[str] = {
     "run_date", "cme_data_date", "lme_warrant_data_date", "lme_offwarrant_data_date",
-    "shfe_data_date", "shfe_warrant_daily_date",
+    "shfe_data_date", "shfe_warrant_daily_date", "comex_price_date", "lme_price_date",
 }
 
 # Which column holds each exchange's report as-of date, and its value columns.
@@ -72,7 +76,7 @@ def build_daily_series(
 
     cols = columns or [
         c for c in work.columns
-        if c.endswith("_t") or c in DATE_COLS or c.endswith("_stale")
+        if c.endswith(("_t", "_lb")) or c in DATE_COLS or c.endswith("_stale")
     ]
     out = work[cols].reindex(calendar).ffill()
     out.index.name = "date"

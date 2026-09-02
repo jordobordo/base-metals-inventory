@@ -3,7 +3,7 @@ pandas>=2.2
 requests>=2.32
 python-dateutil>=2.9
 
-# Cloudflare-fronted LME reports API — needs Chrome TLS/JA3 impersonation
+# Chrome TLS/JA3 impersonation — LME reports API (Cloudflare) + Yahoo price feed
 curl_cffi>=0.7
 
 # HTML / Excel parsing for the CME report (it's HTML wearing an .xls extension)
