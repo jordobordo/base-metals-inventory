@@ -23,7 +23,8 @@ SCHEMA: list[str] = [
     "shfe_on_warrant_t", "shfe_cancelled_t", "shfe_off_warrant_t", "shfe_total_t",
     "shfe_data_date", "shfe_stale", "shfe_warrant_daily_t", "shfe_warrant_daily_date",
     # Global
-    "global_on_warrant_t", "global_cancelled_t", "global_off_warrant_t", "global_total_t",
+    "global_on_warrant_t", "global_cancelled_t", "global_off_warrant_t",
+    "global_reported_stock_t", "global_total_t",
     # Provenance
     "sources_ok", "sources_failed", "notes",
 ]
@@ -140,5 +141,9 @@ def build_asof_series(
     out["global_on_warrant_t"] = _sum(["cme_on_warrant_t", "lme_on_warrant_t", "shfe_on_warrant_t"])
     out["global_cancelled_t"] = _sum(["cme_cancelled_t", "lme_cancelled_t", "shfe_cancelled_t"])
     out["global_off_warrant_t"] = _sum(["cme_off_warrant_t", "lme_off_warrant_t"])  # SHFE: none
-    out["global_total_t"] = _sum(["cme_total_t", "lme_total_t", "shfe_total_t"])
+    # Each *_total_t is that exchange's headline figure; "reported stock" sums them.
+    out["global_reported_stock_t"] = _sum(["cme_total_t", "lme_total_t", "shfe_total_t"])
+    # Grand total per spec = reported stock + LME off-warrant (the one off-warrant
+    # amount not already inside any exchange's headline figure).
+    out["global_total_t"] = _sum(["cme_total_t", "lme_total_t", "shfe_total_t", "lme_off_warrant_t"])
     return out.reset_index()

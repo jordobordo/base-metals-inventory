@@ -66,17 +66,34 @@ Action commits a fresh parquet.
 ## Data model (`data/copper_inventory.parquet`)
 
 One row per pipeline run (`run_date`). Per exchange: `*_on_warrant_t`,
-`*_cancelled_t`, `*_off_warrant_t`, `*_total_t` (all metric tonnes), plus that
+`*_cancelled_t`, `*_off_warrant_t`, and `*_total_t` = that exchange's **headline
+reported stock** (the figure public trackers quote — CME's TOTAL COPPER, LME's
+on-warrant closing = live + cancelled, SHFE's 库存). All metric tonnes. Plus each
 exchange's own `*_data_date` (report as-of date) and a `*_stale` flag when the
-value was carried forward. `global_*` columns sum the three exchanges
-(`global_off_warrant_t` excludes SHFE, which does not report it).
+value was carried forward.
+
+Global columns:
+
+| column | meaning |
+|--------|---------|
+| `global_on_warrant_t` / `global_cancelled_t` / `global_off_warrant_t` | sum of the per-exchange buckets (`global_off_warrant_t` excludes SHFE — it doesn't report off-warrant) |
+| `global_reported_stock_t` | `cme_total + lme_total + shfe_total` — add up each exchange's headline figure |
+| `global_total_t` | grand total per spec = on-warrant + cancelled + off-warrant = `global_reported_stock_t` + LME off-warrant (the one off-warrant amount not already inside a headline figure) |
+
+Sanity check against public sources: `lme_total_t` should equal the "LME copper
+stock" on Westmetall; `cme_total_t` ÷ 0.907185 should equal COMEX "TOTAL COPPER"
+in short tons; `shfe_total_t` should equal the SMM weekly SHFE copper stock. Note
+LME/press often date a given `lme_total_t` one business day later than the source
+file (e.g. the "28 Aug" file's 233,500 t shows as "01 Sep" on Westmetall).
 
 ### Harmonisation notes
 
 - **CME**: Registered = on-warrant, Eligible = off-warrant, cancelled = 0 (COMEX
   has no cancelled-warrant concept). Reported in short tons → ×0.907185.
 - **LME**: Open Tonnage = on-warrant (live), Cancelled Tonnage = cancelled,
-  off-warrant from the separate T+3 `Daily_OWSR` report.
+  `lme_total_t` = Closing Stock = live + cancelled (the headline "LME copper
+  stock"). Off-warrant comes from the separate T+3 `Daily_OWSR` report and is
+  **not** part of `lme_total_t`.
 - **SHFE**: 仓单 = on-warrant, `库存 − 仓单` = implied non-warranted (shown in the
   *Cancelled* column — **not** a true cancelled-warrant figure), off-warrant not
   reported. The **weekly** report is the source of truth; the daily warrant

@@ -56,12 +56,6 @@ def fmt(value: float | None, unit_div: float, suffix: str) -> str:
     return f"{value / unit_div:,.0f} {suffix}"
 
 
-def delta(cur: float | None, prev: float | None, unit_div: float) -> str | None:
-    if cur is None or prev is None or pd.isna(cur) or pd.isna(prev):
-        return None
-    return f"{(cur - prev) / unit_div:+,.0f}"
-
-
 runs = load_runs()
 
 st.title("🟠 Global Copper Warehouse Inventory")
@@ -117,23 +111,28 @@ with st.sidebar:
 latest = runs.iloc[-1]
 prev = runs.iloc[-2] if len(runs) > 1 else None
 
-# --------------------------------------------------------------------------- #
-# Freshness banner
-# --------------------------------------------------------------------------- #
-failed = str(latest.get("sources_failed") or "").strip()
-stale_flags = [c for c in ("cme_stale", "lme_stale", "lme_offwarrant_stale", "shfe_stale")
-               if bool(latest.get(c))]
-if failed or stale_flags:
-    bits = []
-    if failed:
-        bits.append(f"failed this run: **{failed}**")
-    if stale_flags:
-        bits.append("carried forward: **" + ", ".join(s.replace("_stale", "").upper() for s in stale_flags) + "**")
-    st.warning("⚠️ " + " · ".join(bits) + f"  \n_{latest.get('notes') or ''}_")
 
 def _asof(e: str):
     v = latest.get(EXCHANGE_DATE_COL[e])
     return pd.to_datetime(v).date() if pd.notna(v) else None
+
+
+def dod(col: str) -> tuple[float | None, float | None]:
+    """Day-over-day absolute + % change of `col` (latest run vs previous run)."""
+    cur = latest.get(col)
+    prv = prev.get(col) if prev is not None else None
+    if pd.isna(cur) or prv is None or pd.isna(prv):
+        return None, None
+    d = float(cur) - float(prv)
+    pct = (d / float(prv) * 100.0) if float(prv) != 0 else None
+    return d, pct
+
+
+def delta_str(col: str) -> str | None:
+    d, pct = dod(col)
+    if d is None:
+        return None
+    return f"{d / unit_div:+,.0f} {unit_suffix}" + (f"  ({pct:+.1f}%)" if pct is not None else "")
 
 
 as_of = " · ".join(f"{EXCHANGE_LABELS[e]}: {_asof(e) or 'n/a'}" for e in EXCHANGES)
@@ -143,21 +142,19 @@ st.caption(f"Last pipeline run **{latest['run_date'].date()}** — data as of: {
 # KPI row
 # --------------------------------------------------------------------------- #
 k = st.columns(4)
-k[0].metric(
-    "Global total",
-    fmt(latest.get("global_total_t"), unit_div, unit_suffix),
-    delta(latest.get("global_total_t"), prev.get("global_total_t") if prev is not None else None, unit_div),
-)
+k[0].metric("Global reported stock",
+            fmt(latest.get("global_reported_stock_t"), unit_div, unit_suffix),
+            delta_str("global_reported_stock_t"))
 for col, b in zip(k[1:], BUCKETS):
-    col.metric(
-        f"Global {BUCKET_LABELS[b].lower()}",
-        fmt(latest.get(f"global_{b}_t"), unit_div, unit_suffix),
-        delta(
-            latest.get(f"global_{b}_t"),
-            prev.get(f"global_{b}_t") if prev is not None else None,
-            unit_div,
-        ),
-    )
+    col.metric(f"Global {BUCKET_LABELS[b].lower()}",
+               fmt(latest.get(f"global_{b}_t"), unit_div, unit_suffix),
+               delta_str(f"global_{b}_t"))
+st.caption(
+    f"Reported stock = each exchange's own headline figure (COMEX total, LME "
+    f"on-warrant, SHFE 库存). Grand total **incl. LME off-warrant** "
+    f"({fmt(latest.get('lme_off_warrant_t'), unit_div, unit_suffix)}): "
+    f"**{fmt(latest.get('global_total_t'), unit_div, unit_suffix)}**."
+)
 
 st.divider()
 
@@ -195,28 +192,56 @@ with right:
         y_label=unit_suffix, x_label=x_label,
     )
 
-st.subheader("Per-exchange breakdown (latest)")
-rows = []
+st.subheader("Breakdown & day-over-day change")
+
+
+def _metric_rows(group_label, col_map, asof):
+    for mlabel, col in col_map:
+        cur = latest.get(col)
+        d, pct = dod(col)
+        yield {
+            "": group_label,
+            "Metric": mlabel,
+            f"Value ({unit_suffix})": float(cur) / unit_div if pd.notna(cur) else None,
+            f"DoD Δ ({unit_suffix})": d / unit_div if d is not None else None,
+            "DoD Δ %": pct,
+            "As of": asof,
+        }
+
+
+tbl = []
 for e in EXCHANGES:
-    rows.append({
-        "Exchange": EXCHANGE_LABELS[e],
-        "On-warrant": latest.get(f"{e}_on_warrant_t"),
-        "Cancelled": latest.get(f"{e}_cancelled_t"),
-        "Off-warrant": latest.get(f"{e}_off_warrant_t"),
-        "Total": latest.get(f"{e}_total_t"),
-        "As of": _asof(e),
-    })
-breakdown = pd.DataFrame(rows).set_index("Exchange")
-num_cols = ["On-warrant", "Cancelled", "Off-warrant", "Total"]
-breakdown[num_cols] = breakdown[num_cols] / unit_div
+    tbl += _metric_rows(EXCHANGE_LABELS[e], [
+        ("On-warrant", f"{e}_on_warrant_t"),
+        ("Cancelled", f"{e}_cancelled_t"),
+        ("Off-warrant", f"{e}_off_warrant_t"),
+        ("Reported stock", f"{e}_total_t"),
+    ], _asof(e))
+tbl += _metric_rows("GLOBAL", [
+    ("On-warrant", "global_on_warrant_t"),
+    ("Cancelled", "global_cancelled_t"),
+    ("Off-warrant", "global_off_warrant_t"),
+    ("Reported stock", "global_reported_stock_t"),
+    ("Grand total (incl. LME off-warrant)", "global_total_t"),
+], None)
+bt = pd.DataFrame(tbl)
 st.dataframe(
-    breakdown.style.format({c: "{:,.0f}" for c in num_cols}, na_rep="—"),
-    width="stretch",
+    bt.style.format({
+        f"Value ({unit_suffix})": "{:,.0f}",
+        f"DoD Δ ({unit_suffix})": "{:+,.0f}",
+        "DoD Δ %": "{:+.1f}%",
+    }, na_rep="—"),
+    width="stretch", hide_index=True,
 )
 st.caption(
-    "SHFE *Cancelled* column is the implied non-warranted portion (库存 − 仓单). "
-    f"SHFE daily warrant (side feed): {fmt(latest.get('shfe_warrant_daily_t'), unit_div, unit_suffix)}"
-    f" @ {pd.to_datetime(latest.get('shfe_warrant_daily_date')).date() if pd.notna(latest.get('shfe_warrant_daily_date')) else 'n/a'}."
+    "**Reported stock** = each exchange's headline figure: CME = Registered + "
+    "Eligible; LME = on-warrant (live + cancelled); SHFE = 库存. Off-warrant is a "
+    "separate figure only LME publishes — it is *not* in LME's reported stock but "
+    "*is* in the global grand total. SHFE *Cancelled* is the implied non-warranted "
+    f"portion (库存 − 仓单). DoD = latest pipeline run vs the previous run. "
+    f"SHFE daily warrant (side feed): "
+    f"{fmt(latest.get('shfe_warrant_daily_t'), unit_div, unit_suffix)} @ "
+    f"{pd.to_datetime(latest.get('shfe_warrant_daily_date')).date() if pd.notna(latest.get('shfe_warrant_daily_date')) else 'n/a'}."
 )
 
 # --------------------------------------------------------------------------- #

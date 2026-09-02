@@ -75,8 +75,8 @@ def test_harmonisation_and_global_total(monkeypatch) -> None:
     assert row["lme_on_warrant_t"] == 107_050.0
     assert row["lme_cancelled_t"] == 128_525.0
     assert row["lme_off_warrant_t"] == 117_155.0
-    # LME total prefers the report's own closing stock + off-warrant
-    assert row["lme_total_t"] == 235_575.0 + 117_155.0
+    # LME reported stock = closing stock (live + cancelled), NOT incl. off-warrant
+    assert row["lme_total_t"] == 235_575.0
 
     assert row["shfe_on_warrant_t"] == 31_462.0
     assert row["shfe_cancelled_t"] == 40_966.0
@@ -88,16 +88,19 @@ def test_harmonisation_and_global_total(monkeypatch) -> None:
     assert row["global_on_warrant_t"] == round(477_482.0 * CONV + 107_050.0 + 31_462.0, 3)
     assert row["global_cancelled_t"] == round(0.0 + 128_525.0 + 40_966.0, 3)
     assert row["global_off_warrant_t"] == round(281_407.0 * CONV + 117_155.0, 3)  # no SHFE
-    assert row["global_total_t"] == round(row["cme_total_t"] + row["lme_total_t"] + row["shfe_total_t"], 3)
-
-    # internal consistency: buckets sum to the total (SHFE off-warrant is 0 here,
-    # and its total already == on + cancelled)
+    # reported stock = sum of each exchange's headline figure
+    assert row["global_reported_stock_t"] == round(
+        row["cme_total_t"] + 235_575.0 + 72_428.0, 3
+    )
+    # grand total = reported stock + LME off-warrant = sum of the three buckets
+    assert row["global_total_t"] == round(row["global_reported_stock_t"] + 117_155.0, 3)
     assert abs(
         row["global_total_t"]
         - (row["global_on_warrant_t"] + row["global_cancelled_t"] + row["global_off_warrant_t"])
     ) < 1.0
     assert row["sources_ok"] == "CME,LME,LME_OWSR,SHFE"
-    print("test_harmonisation_and_global_total: OK  global_total_t =", row["global_total_t"])
+    print("test_harmonisation_and_global_total: OK  reported=%s grand=%s"
+          % (row["global_reported_stock_t"], row["global_total_t"]))
 
 
 def test_carry_forward_on_failure(monkeypatch) -> None:
@@ -178,15 +181,20 @@ def test_asof_series(monkeypatch) -> None:
     # before 08-28 only LME contributes
     assert pd.isna(a.loc["2026-08-27", "shfe_total_t"])
     assert pd.isna(a.loc["2026-08-27", "cme_total_t"])
-    assert a.loc["2026-08-27", "lme_total_t"] == 235_575.0 + 117_155.0
+    assert a.loc["2026-08-27", "lme_total_t"] == 235_575.0  # closing only
     # from 08-28 all three are on the timeline
     assert a.loc["2026-08-28", "shfe_total_t"] == 72_428.0
     assert a.loc["2026-08-28", "cme_total_t"] == round(758_889.0 * CONV, 3)
-    # global total re-summed from the aligned legs
-    assert a.loc["2026-09-02", "global_total_t"] == round(
+    # reported stock = sum of headline figures; grand total adds LME off-warrant
+    assert a.loc["2026-09-02", "global_reported_stock_t"] == round(
         a.loc["2026-09-02", "cme_total_t"]
         + a.loc["2026-09-02", "lme_total_t"]
         + a.loc["2026-09-02", "shfe_total_t"],
+        3,
+    )
+    assert a.loc["2026-09-02", "global_total_t"] == round(
+        a.loc["2026-09-02", "global_reported_stock_t"]
+        + a.loc["2026-09-02", "lme_off_warrant_t"],
         3,
     )
     print("test_asof_series: OK")

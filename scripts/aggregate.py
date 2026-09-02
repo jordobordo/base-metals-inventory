@@ -211,12 +211,18 @@ def _coerce_from_prev(col: str, value: Any) -> Any:
 
 
 def _compute_totals(row: dict[str, Any], lme_closing_t: float | None) -> None:
-    # LME total: prefer the report's own closing stock (on+cancelled) + off-warrant.
     lme_on = _num(row.get("lme_on_warrant_t"))
     lme_can = _num(row.get("lme_cancelled_t"))
     lme_off = _num(row.get("lme_off_warrant_t"))
-    lme_onwarr_total = lme_closing_t if lme_closing_t is not None else _add(lme_on, lme_can)
-    row["lme_total_t"] = _round(_add(lme_onwarr_total, lme_off))
+
+    # Each exchange's *_total_t is the figure public trackers headline:
+    #   CME  -> TOTAL COPPER (Registered + Eligible)  [matches Reuters COMEX stocks]
+    #   LME  -> Closing Stock (live + cancelled)      [matches Westmetall / LME site]
+    #   SHFE -> 库存 physical inventory                [matches SMM]
+    # LME off-warrant (OWSR) is a SEPARATE figure that no "LME stock" quote includes.
+    row["lme_total_t"] = _round(
+        lme_closing_t if lme_closing_t is not None else _add(lme_on, lme_can)
+    )
 
     cme_total = _num(row.get("cme_total_t"))
     shfe_total = _num(row.get("shfe_total_t"))
@@ -225,9 +231,13 @@ def _compute_totals(row: dict[str, Any], lme_closing_t: float | None) -> None:
                                              _num(row.get("shfe_on_warrant_t"))))
     row["global_cancelled_t"] = _round(_add(_num(row.get("cme_cancelled_t")), lme_can,
                                             _num(row.get("shfe_cancelled_t"))))
-    # Off-warrant deliberately excludes SHFE (not reported).
+    # Off-warrant excludes SHFE (not reported).
     row["global_off_warrant_t"] = _round(_add(_num(row.get("cme_off_warrant_t")), lme_off))
-    row["global_total_t"] = _round(_add(cme_total, row["lme_total_t"], shfe_total))
+
+    # "Reported stock" = sum of each exchange's own headline figure.
+    row["global_reported_stock_t"] = _round(_add(cme_total, row["lme_total_t"], shfe_total))
+    # Grand total per spec = on-warrant + cancelled + off-warrant = reported + LME off-warrant.
+    row["global_total_t"] = _round(_add(row["global_reported_stock_t"], lme_off))
 
 
 def _num(v: Any) -> float | None:
@@ -308,11 +318,13 @@ def _fmt_summary(row: dict[str, Any]) -> str:
     return "\n".join([
         f"  run_date            {row['run_date']}   sources_ok={row['sources_ok'] or '-'}"
         f"  failed={row['sources_failed'] or '-'}",
-        f"  {'':16} {'on-warrant':>12} {'cancelled':>12} {'off-warrant':>12} {'total':>12}   as-of",
+        f"  {'':16} {'on-warrant':>12} {'cancelled':>12} {'off-warrant':>12} {'reported*':>12}   as-of",
         f"  CME              {g('cme_on_warrant_t')} {g('cme_cancelled_t')} {g('cme_off_warrant_t')} {g('cme_total_t')}   {row.get('cme_data_date')}",
         f"  LME              {g('lme_on_warrant_t')} {g('lme_cancelled_t')} {g('lme_off_warrant_t')} {g('lme_total_t')}   {row.get('lme_warrant_data_date')} / {row.get('lme_offwarrant_data_date')}",
         f"  SHFE             {g('shfe_on_warrant_t')} {g('shfe_cancelled_t')} {g('shfe_off_warrant_t')} {g('shfe_total_t')}   {row.get('shfe_data_date')}",
-        f"  {'GLOBAL':16} {g('global_on_warrant_t')} {g('global_cancelled_t')} {g('global_off_warrant_t')} {g('global_total_t')}",
+        f"  {'GLOBAL':16} {g('global_on_warrant_t')} {g('global_cancelled_t')} {g('global_off_warrant_t')} {g('global_reported_stock_t')}",
+        f"  * reported = each exchange's headline figure; grand total incl. LME "
+        f"off-warrant = {g('global_total_t').strip()}",
     ])
 
 
