@@ -195,12 +195,49 @@ _BUCKET_COLS = [
 ]
 
 
-def _dod_cell(col: str) -> str:
-    """DoD change of `col` in tonnes with the % change in brackets."""
+def _dod_cell(col: str, *, usd: bool = False) -> str:
+    """DoD change of `col` with the % change in brackets. Tonnes, or USD/t."""
     d, pct = dod(col)
     if d is None:
         return "—"
-    return f"{d:+,.0f} t" + (f"  ({pct:+.1f}%)" if pct is not None else "")
+    unit = " USD/t" if usd else " t"
+    return f"{d:+,.0f}{unit}" + (f"  ({pct:+.1f}%)" if pct is not None else "")
+
+
+# gentle tints per stock type: (cell background, header background)
+_TINT = {
+    "On-warrant": ("#eef4fb", "#d6e5f6"),
+    "Cancelled": ("#fdf3e8", "#f6e2c8"),
+    "Off-warrant": ("#eef6ee", "#d8ecd8"),
+    "Reported stock": ("#f3f1f9", "#e1dbf1"),
+    "_plain": ("#f1f3f6", "#dfe3ea"),
+}
+_TH_STYLE = [
+    ("text-align", "center"), ("font-weight", "700"), ("color", "#1f2430"),
+    ("background-color", "#e7e9ef"), ("border-bottom", "2px solid #b3bac7"),
+    ("padding", "8px 12px"), ("font-size", "0.9rem"),
+]
+
+
+def styled_table(df: pd.DataFrame, groups: list[tuple[str, list[str]]], num_fmt: dict) -> object:
+    sty = (
+        df.style.format(num_fmt, na_rep="—")
+        .set_properties(**{"text-align": "center", "color": "#1f2430", "padding": "7px 12px"})
+    )
+    tstyles = [
+        {"selector": "th", "props": _TH_STYLE},
+        {"selector": "th.row_heading", "props": [("background-color", "#e7e9ef")]},
+        {"selector": "table", "props": [("border-collapse", "collapse"), ("width", "100%")]},
+    ]
+    for label, cols in groups:
+        cell_bg, head_bg = _TINT[label]
+        for c in cols:
+            if c not in df.columns:
+                continue
+            j = df.columns.get_loc(c)
+            sty = sty.set_properties(subset=[c], **{"background-color": cell_bg})
+            tstyles.append({"selector": f"th.col_heading.col{j}", "props": [("background-color", head_bg)]})
+    return sty.set_table_styles(tstyles)
 
 
 rows = []
@@ -210,22 +247,21 @@ for e in EXCHANGES:
         col = f"{e}_{msuf}"
         cur = latest.get(col)
         row[f"{mlabel} ({unit_suffix})"] = float(cur) / unit_div if pd.notna(cur) else None
-        row[f"{mlabel} · DoD Δ"] = _dod_cell(col)
-    row["As of"] = _asof(e)
+        row[f"{mlabel} Δ"] = _dod_cell(col)
+    row["As of"] = str(_asof(e) or "—")
     rows.append(row)
 
 bt = pd.DataFrame(rows).set_index("Exchange")
-st.dataframe(
-    bt.style.format({f"{m} ({unit_suffix})": "{:,.0f}" for m, _ in _BUCKET_COLS}, na_rep="—"),
-    width="stretch",
-)
+_bt_groups = [(m, [f"{m} ({unit_suffix})", f"{m} Δ"]) for m, _ in _BUCKET_COLS]
+st.table(styled_table(bt, _bt_groups, {f"{m} ({unit_suffix})": "{:,.0f}" for m, _ in _BUCKET_COLS}))
 st.caption(
     "**Reported stock** = each exchange's headline figure: CME = Registered + "
     "Eligible; LME = on-warrant (live + cancelled); SHFE = 库存. Off-warrant is a "
     "separate figure only LME publishes — *not* in LME's reported stock, but *is* "
     "in `global_total_t`. SHFE *Cancelled* is the implied non-warranted portion "
-    "(库存 − 仓单). **DoD Δ is in tonnes** (latest run vs previous run), % change in "
-    f"brackets. SHFE daily warrant (side feed): "
+    "(库存 − 仓单). Values in "
+    f"{unit}; **Δ is in tonnes** (latest run vs previous), % in brackets. "
+    f"SHFE daily warrant (side feed): "
     f"{fmt(latest.get('shfe_warrant_daily_t'), unit_div, unit_suffix)} @ "
     f"{pd.to_datetime(latest.get('shfe_warrant_daily_date')).date() if pd.notna(latest.get('shfe_warrant_daily_date')) else 'n/a'}."
 )
@@ -233,51 +269,37 @@ st.caption(
 st.divider()
 
 # --------------------------------------------------------------------------- #
-# CME (COMEX) - LME copper price spread
+# CME (COMEX) - LME copper price spread  (market-on-close, previous trading day)
 # --------------------------------------------------------------------------- #
 st.subheader("CME (COMEX) − LME copper price spread")
 
+if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
+    prows = [
+        {"": "CME − LME (3-month)", "USD/t": latest.get("cme_lme_spread_3m_usd_t"),
+         "Δ": _dod_cell("cme_lme_spread_3m_usd_t", usd=True)},
+        {"": "CME price (COMEX front, MoC)", "USD/t": latest.get("comex_copper_usd_t"),
+         "Δ": _dod_cell("comex_copper_usd_t", usd=True)},
+        {"": "LME price (3-month, MoC)", "USD/t": latest.get("lme_copper_3m_usd_t"),
+         "Δ": _dod_cell("lme_copper_3m_usd_t", usd=True)},
+    ]
+    pt = pd.DataFrame(prows).set_index("")
+    st.table(styled_table(pt, [("_plain", ["USD/t", "Δ"])], {"USD/t": "{:,.0f}"}))
 
-def usd_delta(col: str) -> str | None:
-    d, pct = dod(col)
-    if d is None:
-        return None
-    return f"{d:+,.0f} USD/t" + (f"  ({pct:+.1f}%)" if pct is not None else "")
-
-
-def usd(col: str) -> str:
-    v = latest.get(col)
-    return "—" if pd.isna(v) else f"{v:,.0f} USD/t"
-
-
-if pd.notna(latest.get("cme_lme_spread_usd_t")):
-    m = st.columns(4)
-    m[0].metric("CME − LME (cash)", f"{latest['cme_lme_spread_usd_t']:+,.0f} USD/t",
-                usd_delta("cme_lme_spread_usd_t"))
-    m[1].metric("CME − LME (3-month)",
-                f"{latest['cme_lme_spread_3m_usd_t']:+,.0f} USD/t"
-                if pd.notna(latest.get("cme_lme_spread_3m_usd_t")) else "—",
-                usd_delta("cme_lme_spread_3m_usd_t"))
-    m[2].metric("COMEX HG (front)", usd("comex_copper_usd_t"), usd_delta("comex_copper_usd_t"))
-    m[3].metric("LME cash", usd("lme_copper_cash_usd_t"), usd_delta("lme_copper_cash_usd_t"))
-
-    cpx_d = latest.get("comex_price_date")
-    lme_d = latest.get("lme_price_date")
+    cpx_d, lme_d = latest.get("comex_price_date"), latest.get("lme_price_date")
     st.caption(
-        f"COMEX HG=F {latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.62 lb/t "
-        f"− LME cash settlement. Prices as of "
-        f"{pd.to_datetime(cpx_d).date() if pd.notna(cpx_d) else 'n/a'} (COMEX) / "
-        f"{pd.to_datetime(lme_d).date() if pd.notna(lme_d) else 'n/a'} (LME). "
+        f"Market-on-close (previous trading day). COMEX HG=F "
+        f"{latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.62 lb/t "
+        f"− LME 3-month. As of {pd.to_datetime(cpx_d).date() if pd.notna(cpx_d) else 'n/a'} "
+        f"(COMEX) / {pd.to_datetime(lme_d).date() if pd.notna(lme_d) else 'n/a'} (LME). "
         "Positive = COMEX above LME. Sources: Yahoo Finance, Westmetall."
     )
 
-    _sp = build_daily_series(runs).set_index("date")
-    _sp = _sp[["cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t"]].dropna(how="all")
+    _sp = build_daily_series(runs).set_index("date")[["cme_lme_spread_3m_usd_t"]].dropna()
     if not _sp.empty:
-        _sp = _sp.loc[_sp.fillna(-1e12).ne(_sp.fillna(-1e12).shift()).any(axis=1)]
-        _sp.columns = ["vs LME cash", "vs LME 3-month"]
+        _sp = _sp.loc[_sp.ne(_sp.shift()).any(axis=1)]
+        _sp.columns = ["CME − LME 3-month"]
         _sp.index = _sp.index.strftime("%Y-%m-%d")
-        st.line_chart(_sp, height=300, y_label="USD/t", x_label="date")
+        st.line_chart(_sp, height=280, y_label="USD/t", x_label="date")
 else:
     st.info("No CME–LME price data yet — populates from the next pipeline run.")
 

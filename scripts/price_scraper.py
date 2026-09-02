@@ -131,10 +131,12 @@ def get_comex_copper_price(*, before: dt.date | None = None) -> ComexCopperPrice
 # --------------------------------------------------------------------------- #
 # LME  (Westmetall table, USD/tonne)
 # --------------------------------------------------------------------------- #
-def get_lme_copper_price(*, session=None) -> LmeCopperPrice:
-    """Latest LME Copper Cash-Settlement (+ 3-month) from the Westmetall table."""
+def get_lme_copper_price(*, before: dt.date | None = None, session=None) -> LmeCopperPrice:
+    """LME Copper Cash-Settlement (+ 3-month) for the last completed trading day
+    strictly before ``before`` (default today UTC) — i.e. the market-on-close."""
     if requests is None:  # pragma: no cover
         raise PriceScraperError("the 'requests' package is required for the LME price feed")
+    cutoff = before or dt.datetime.now(dt.timezone.utc).date()
     own = session is None
     sess = session or requests.Session()
     if own:
@@ -143,10 +145,10 @@ def get_lme_copper_price(*, session=None) -> LmeCopperPrice:
         r = sess.get(WESTMETALL_LME_CU, timeout=DEFAULT_TIMEOUT)
         if r.status_code != 200 or "<tr" not in r.text.lower():
             raise PriceScraperError(f"Westmetall HTTP {r.status_code} / no table")
-        rows = _parse_westmetall(r.text)
+        rows = [row for row in _parse_westmetall(r.text) if row[0] < cutoff]  # newest first
         if not rows:
-            raise PriceScraperError("Westmetall: no data rows parsed")
-        d, cash, m3 = rows[0]  # newest first
+            raise PriceScraperError(f"Westmetall: no LME row before {cutoff}")
+        d, cash, m3 = rows[0]
         if not (1000 < cash < 60000):  # sanity: USD/tonne
             raise PriceScraperError(f"implausible LME cash price {cash} on {d}")
         log.info("LME copper %s: cash %.2f USD/t, 3m %s", d, cash, m3)
