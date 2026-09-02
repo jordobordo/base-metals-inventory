@@ -1,0 +1,75 @@
+name: Daily copper inventory ETL
+
+# Runs the aggregator once a day and commits the refreshed parquet back to the
+# repo. Streamlit Community Cloud redeploys from that commit automatically.
+#
+# Timing: 10:17 UTC. By then the previous business day's reports are all out —
+# LME stock-breakdown publishes ~09:00 London, CME the prior US evening, SHFE the
+# prior China evening. GitHub's scheduler often fires 5-30 min late; that's fine.
+#
+# A blocked source (LME Cloudflare / SHFE WAF from the runner IP) does NOT fail
+# the job: aggregate.py writes a partial row and carries the other exchanges
+# forward. The job only fails if every scraper fails or something unexpected
+# breaks — and GitHub emails you on a failed run.
+
+on:
+  schedule:
+    - cron: "17 10 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: copper-etl
+  cancel-in-progress: false
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run aggregator
+        run: python scripts/aggregate.py -v
+
+      - name: Commit refreshed parquet
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- data/copper_inventory.parquet; then
+            echo "No change to data/copper_inventory.parquet — nothing to commit."
+            exit 0
+          fi
+
+          git add data/copper_inventory.parquet
+          git commit -m "data: copper inventory $(date -u +%Y-%m-%d)"
+
+          for attempt in 1 2 3; do
+            if git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
+               && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "Pushed on attempt ${attempt}."
+              exit 0
+            fi
+            echo "push attempt ${attempt} failed; retrying..." >&2
+            sleep 5
+          done
+          echo "Could not push after 3 attempts." >&2
+          exit 1

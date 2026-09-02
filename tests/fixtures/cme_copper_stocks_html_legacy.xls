@@ -1,0 +1,48 @@
+<html>
+<head><title>Copper Stocks</title></head>
+<body>
+<table border="1">
+  <tr><td colspan="6">COPPER STOCKS - Grade 1 Electrolytic Copper - Reported in Short Tons</td></tr>
+  <tr><td colspan="6">PREPARED BY THE COMEX DIVISION OF THE NEW YORK MERCANTILE EXCHANGE</td></tr>
+  <tr><td colspan="6">AS OF CLOSE OF BUSINESS: August 29, 2026</td></tr>
+</table>
+<br>
+<table border="1">
+  <tr>
+    <th>DEPOSITORY</th>
+    <th>PREVIOUS</th>
+    <th>RECEIVED</th>
+    <th>NET ADJUSTMENT</th>
+    <th>WITHDRAWN</th>
+    <th>REGISTERED</th>
+    <th>ELIGIBLE</th>
+    <th>TOTAL</th>
+  </tr>
+  <tr>
+    <td>A - CHICAGO, IL</td>
+    <td>5,000</td><td>0</td><td>0</td><td>100</td>
+    <td>4,900</td><td>10,250</td><td>15,150</td>
+  </tr>
+  <tr>
+    <td>B - MOBILE, AL</td>
+    <td>3,200</td><td>250</td><td>0</td><td>0</td>
+    <td>3,450</td><td>8,000</td><td>11,450</td>
+  </tr>
+  <tr>
+    <td>C - NEW ORLEANS, LA</td>
+    <td>2,000</td><td>0</td><td>-50</td><td>0</td>
+    <td>1,950</td><td>5,500</td><td>7,450</td>
+  </tr>
+  <tr>
+    <td>D - SALT LAKE CITY, UT</td>
+    <td>1,000</td><td>0</td><td>0</td><td>0</td>
+    <td>1,000</td><td>2,300</td><td>3,300</td>
+  </tr>
+  <tr>
+    <td><b>TOTAL</b></td>
+    <td>11,200</td><td>500</td><td>-50</td><td>100</td>
+    <td>11,300</td><td>26,050</td><td>37,350</td>
+  </tr>
+</table>
+</body>
+</html>

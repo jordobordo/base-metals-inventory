@@ -1,0 +1,20 @@
+# Core ETL
+pandas>=2.2
+requests>=2.32
+python-dateutil>=2.9
+
+# Cloudflare-fronted LME reports API — needs Chrome TLS/JA3 impersonation
+curl_cffi>=0.7
+
+# HTML / Excel parsing for the CME report (it's HTML wearing an .xls extension)
+lxml>=5.2
+html5lib>=1.1
+beautifulsoup4>=4.12
+xlrd>=2.0
+openpyxl>=3.1
+
+# Storage
+pyarrow>=16.0
+
+# Dashboard (STEP 5) — Streamlit Community Cloud reads this same file
+streamlit>=1.43
