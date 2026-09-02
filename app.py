@@ -343,22 +343,22 @@ with st.expander("Sources"):
     st.markdown(
         """
 **CME (COMEX)**
-- Copper warehouse stocks — [`Copper_Stocks.xls`](https://www.cmegroup.com/delivery_reports/Copper_Stocks.xls) (Registered / Eligible)
-- Copper futures settlements — [copper.settlements.html](https://www.cmegroup.com/markets/metals/base/copper.settlements.html) (most-active month settle, price leg)
-- NYMEX & COMEX Delivery Notices — [nymex-delivery-notices](https://www.cmegroup.com/solutions/clearing/operations-and-deliveries/nymex-delivery-notices.html) (reference)
+- [Warehouse & Depository Stocks (Registrar Reports)](https://www.cmegroup.com/clearing/operations-and-deliveries/registrar-reports.html) — hosts the copper stocks report (Registered / Eligible)
+- [Copper futures settlements](https://www.cmegroup.com/markets/metals/base/copper.settlements.html) — most-active month settle (price leg)
+- [NYMEX & COMEX Delivery Notices & Stocks](https://www.cmegroup.com/solutions/clearing/operations-and-deliveries/nymex-delivery-notices.html)
 
 **LME**
-- Stock breakdown report — [stock-breakdown-report](https://www.lme.com/market-data/reports-and-data/warehouse-and-stocks-reports/stock-breakdown-report?page=1&DateFacet=Last+7+days) (live + cancelled warrants)
-- Off-warrant stock reporting — [off-warrant-stock-reporting](https://www.lme.com/market-data/reports-and-data/warehouse-and-stocks-reports/off-warrant-stock-reporting?page=1&DateFacet=Last+7+days)
-- LME Copper prices — [lme-copper](https://www.lme.com/en/metals/non-ferrous/lme-copper) (day-delayed Closing 3-month + Official cash)
-- Westmetall — [markdaten.php](https://www.westmetall.com/en/markdaten.php?action=table&field=LME_Cu_cash) (LME price fallback)
+- [Stock breakdown report](https://www.lme.com/market-data/reports-and-data/warehouse-and-stocks-reports/stock-breakdown-report?page=1&DateFacet=Last+7+days) — live + cancelled warrants
+- [Off-warrant stock reporting](https://www.lme.com/market-data/reports-and-data/warehouse-and-stocks-reports/off-warrant-stock-reporting?page=1&DateFacet=Last+7+days)
+- [LME Copper](https://www.lme.com/en/metals/non-ferrous/lme-copper) — day-delayed Closing 3-month + Official cash prices
+- [Westmetall market data](https://www.westmetall.com/en/markdaten.php) — LME price fallback
 
 **SHFE**
-- Weekly stock report / 库存周报 — [WeeklyData](https://www.shfe.com.cn/eng/reports/StatisticalData/WeeklyData/?query_params=weeklystock)
-- Daily warehouse-warrant report / 仓单日报 — [DailyData](https://www.shfe.com.cn/eng/reports/StatisticalData/DailyData/?query_params=dailystock)
+- [Weekly stock report / 库存周报](https://www.shfe.com.cn/eng/reports/StatisticalData/WeeklyData/?query_params=weeklystock)
+- [Daily warehouse-warrant report / 仓单日报](https://www.shfe.com.cn/eng/reports/StatisticalData/DailyData/?query_params=dailystock)
 
 **Prices (fallback)**
-- Yahoo Finance — [`HG=F`](https://finance.yahoo.com/quote/HG=F) (COMEX copper, continuous front-month)
+- [Yahoo Finance — COMEX copper HG=F](https://finance.yahoo.com/quote/HG=F)
         """
     )
 
