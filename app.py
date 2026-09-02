@@ -281,21 +281,23 @@ st.divider()
 st.subheader("CME (COMEX) − LME copper price spread")
 
 if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
+    contract = latest.get("comex_contract") or "front"
     p = st.columns(3)
     p[0].metric("CME − LME (3-month)", f"{latest['cme_lme_spread_3m_usd_t']:+,.0f} USD/t",
                 usd_delta("cme_lme_spread_3m_usd_t"))
-    p[1].metric("CME price (COMEX front)",
+    p[1].metric(f"CME price ({contract})",
                 f"{latest['comex_copper_usd_t']:,.0f} USD/t", usd_delta("comex_copper_usd_t"))
     p[2].metric("LME price (3-month)",
                 f"{latest['lme_copper_3m_usd_t']:,.0f} USD/t", usd_delta("lme_copper_3m_usd_t"))
 
     cpx_d, lme_d = latest.get("comex_price_date"), latest.get("lme_price_date")
     st.caption(
-        f"Market-on-close (previous trading day). COMEX HG=F "
-        f"{latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.62 lb/t "
-        f"− LME 3-month. As of {pd.to_datetime(cpx_d).date() if pd.notna(cpx_d) else 'n/a'} "
+        f"Market-on-close (previous trading day). CME official settlement for the "
+        f"most-active COMEX copper month ({contract}) "
+        f"{latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.62 lb/t, minus LME "
+        f"3-month. As of {pd.to_datetime(cpx_d).date() if pd.notna(cpx_d) else 'n/a'} "
         f"(COMEX) / {pd.to_datetime(lme_d).date() if pd.notna(lme_d) else 'n/a'} (LME). "
-        "Positive = COMEX above LME. Sources: Yahoo Finance, Westmetall."
+        "Positive = COMEX above LME. Sources: CME Group, Westmetall."
     )
 
     _sp = build_daily_series(runs).set_index("date")[["cme_lme_spread_3m_usd_t"]].dropna()

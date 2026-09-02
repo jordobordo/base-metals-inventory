@@ -12,9 +12,11 @@ sys.path.insert(0, str(ROOT))
 from scripts.price_scraper import (  # noqa: E402
     LB_PER_TONNE,
     ComexCopperPrice,
+    _contract_code,
     _parse_westmetall,
     _parse_westmetall_date,
     _to_price,
+    _to_settle,
 )
 
 _WESTMETALL_SNIPPET = """
@@ -47,15 +49,26 @@ def test_parse_date_and_price() -> None:
 
 
 def test_lb_to_tonne_conversion() -> None:
-    p = ComexCopperPrice(price_date=dt.date(2026, 9, 1), usd_per_lb=6.5065)
-    # 6.5065 USD/lb * 2204.62 lb/t ~= 14,344 USD/t
-    assert abs(p.usd_per_tonne - 6.5065 * LB_PER_TONNE) < 0.01
-    assert 14_300 < p.usd_per_tonne < 14_400
+    p = ComexCopperPrice(price_date=dt.date(2026, 9, 1), usd_per_lb=6.6005, contract="HGZ26")
+    assert abs(p.usd_per_tonne - 6.6005 * LB_PER_TONNE) < 0.01
+    assert 14_500 < p.usd_per_tonne < 14_600
     print("test_lb_to_tonne_conversion: OK", p.usd_per_tonne)
+
+
+def test_cme_settlement_parsing() -> None:
+    assert _to_settle("6.6005") == 6.6005
+    assert _to_settle("6.4310A") == 6.4310   # trailing quote-type letter
+    assert _to_settle("162,826") == 162826.0
+    assert _to_settle("-") is None
+    assert _contract_code("DEC 26") == "HGZ26"
+    assert _contract_code("SEP 26") == "HGU26"
+    assert _contract_code("MAR 27") == "HGH27"
+    print("test_cme_settlement_parsing: OK")
 
 
 if __name__ == "__main__":
     test_parse_westmetall()
     test_parse_date_and_price()
+    test_cme_settlement_parsing()
     test_lb_to_tonne_conversion()
     print("\nAll offline price-scraper tests passed.")

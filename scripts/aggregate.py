@@ -130,7 +130,7 @@ def _run_shfe(enrich_with_daily: bool) -> dict[str, Any]:
 
 
 _PRICE_COLS = [
-    "comex_copper_usd_lb", "comex_copper_usd_t", "comex_price_date",
+    "comex_copper_usd_lb", "comex_copper_usd_t", "comex_price_date", "comex_contract",
     "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_price_date",
     "cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t",
 ]
