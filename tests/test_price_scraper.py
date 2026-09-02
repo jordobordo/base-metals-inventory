@@ -13,6 +13,7 @@ from scripts.price_scraper import (  # noqa: E402
     LB_PER_TONNE,
     ComexCopperPrice,
     _contract_code,
+    _lme_row_value,
     _parse_westmetall,
     _parse_westmetall_date,
     _to_price,
@@ -66,9 +67,26 @@ def test_cme_settlement_parsing() -> None:
     print("test_cme_settlement_parsing: OK")
 
 
+def test_lme_row_value() -> None:
+    closing = {"Rows": [
+        {"RowTitle": "3-month", "Values": ["14274.50"]},
+        {"RowTitle": "Sep 26", "Values": ["14426.14"]},
+    ]}
+    official = {"Rows": [
+        {"RowTitle": "Cash", "Values": ["14395.00", "14395.50"]},   # [bid, offer] -> offer
+        {"RowTitle": "3-month", "Values": ["14213.00", "14215.00"]},
+    ]}
+    assert _lme_row_value(closing, "3-month") == 14274.50
+    assert _lme_row_value(official, "Cash") == 14395.50
+    assert _lme_row_value(official, "3-month") == 14215.00
+    assert _lme_row_value(closing, "Cash") is None
+    print("test_lme_row_value: OK")
+
+
 if __name__ == "__main__":
     test_parse_westmetall()
     test_parse_date_and_price()
     test_cme_settlement_parsing()
+    test_lme_row_value()
     test_lb_to_tonne_conversion()
     print("\nAll offline price-scraper tests passed.")

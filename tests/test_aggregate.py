@@ -50,9 +50,9 @@ _SHFE = {
 _PRICE = {
     "comex_copper_usd_lb": 6.6005, "comex_copper_usd_t": 14_551.61,
     "comex_price_date": dt.date(2026, 9, 1), "comex_contract": "HGZ26",
-    "lme_copper_cash_usd_t": 14_395.50, "lme_copper_3m_usd_t": 14_215.0,
+    "lme_copper_cash_usd_t": 14_395.50, "lme_copper_3m_usd_t": 14_274.50,
     "lme_price_date": dt.date(2026, 9, 1),
-    "cme_lme_spread_usd_t": 156.11, "cme_lme_spread_3m_usd_t": 336.61,
+    "cme_lme_spread_usd_t": 156.11, "cme_lme_spread_3m_usd_t": 277.11,
     "price_legs_ok": ["COMEX", "LME"], "price_legs_failed": [],
 }
 
@@ -112,8 +112,8 @@ def test_harmonisation_and_global_total(monkeypatch) -> None:
     # price leg
     assert row["comex_copper_usd_t"] == 14_551.61
     assert row["comex_contract"] == "HGZ26"
-    assert row["lme_copper_cash_usd_t"] == 14_395.50
-    assert row["cme_lme_spread_3m_usd_t"] == 336.61
+    assert row["lme_copper_3m_usd_t"] == 14_274.50
+    assert row["cme_lme_spread_3m_usd_t"] == 277.11
     print("test_harmonisation_and_global_total: OK  reported=%s grand=%s spread=%s"
           % (row["global_reported_stock_t"], row["global_total_t"], row["cme_lme_spread_usd_t"]))
 

@@ -219,22 +219,27 @@ _TINT = {
     "Reported stock": ("#f3f1f9", "#e1dbf1"),
     "_plain": ("#f1f3f6", "#dfe3ea"),
 }
+_CENTER = "center !important"
 _TH_STYLE = [
-    ("text-align", "center"), ("font-weight", "700"), ("color", "#1f2430"),
-    ("background-color", "#e7e9ef"), ("border-bottom", "2px solid #b3bac7"),
-    ("padding", "8px 12px"), ("font-size", "0.9rem"),
+    ("text-align", _CENTER), ("vertical-align", "middle"), ("font-weight", "700"),
+    ("color", "#1f2430"), ("background-color", "#e7e9ef"),
+    ("border-bottom", "2px solid #b3bac7"), ("padding", "8px 12px"), ("font-size", "0.9rem"),
 ]
 
 
 def styled_table(df: pd.DataFrame, groups: list[tuple[str, list[str]]], num_fmt: dict) -> object:
     sty = (
         df.style.format(num_fmt, na_rep="—")
-        .set_properties(**{"text-align": "center", "color": "#1f2430", "padding": "7px 12px"})
+        .set_properties(**{"text-align": _CENTER, "vertical-align": "middle",
+                           "color": "#1f2430", "padding": "7px 12px"})
     )
     tstyles = [
+        {"selector": "th, td", "props": [("text-align", _CENTER), ("vertical-align", "middle")]},
         {"selector": "th", "props": _TH_STYLE},
-        {"selector": "th.row_heading", "props": [("background-color", "#e7e9ef")]},
-        {"selector": "table", "props": [("border-collapse", "collapse"), ("width", "100%")]},
+        {"selector": "th.row_heading, th.blank", "props": [("background-color", "#e7e9ef")]},
+        {"selector": "caption", "props": [("text-align", _CENTER)]},
+        {"selector": "table", "props": [("border-collapse", "collapse"), ("width", "100%"),
+                                        ("margin", "0 auto")]},
     ]
     for label, cols in groups:
         cell_bg, head_bg = _TINT[label]
