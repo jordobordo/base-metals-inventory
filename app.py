@@ -21,7 +21,11 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
-from scripts.schema import build_daily_series  # noqa: E402
+from scripts.schema import (  # noqa: E402
+    EXCHANGE_DATE_COL,
+    build_asof_series,
+    build_daily_series,
+)
 
 DATA_PATH = Path(__file__).parent / "data" / "copper_inventory.parquet"
 
@@ -78,11 +82,14 @@ with st.sidebar:
     unit = st.radio("Units", ["kilotonnes", "tonnes"], index=0)
     unit_div, unit_suffix = (1000.0, "kt") if unit == "kilotonnes" else (1.0, "t")
 
-    locf = st.toggle(
-        "Forward-fill to today (LOCF)",
-        value=True,
-        help="Carry each exchange's last published figure forward across holidays / "
-        "missing days, as the spec requires. Off = show only actual pipeline runs.",
+    timeline = st.radio(
+        "Timeline",
+        ["Report as-of date", "Pipeline run date"],
+        index=0,
+        help="As-of date: plot each exchange at the date its report is *for* "
+        "(CME ~T+1, LME ~T+2, SHFE = the report Friday) — so today's run already "
+        "spans ~a week. Run date: the day the pipeline fetched it. Both forward-fill "
+        "missing days (LOCF).",
     )
     show_exchanges = st.multiselect(
         "Exchanges",
@@ -91,11 +98,10 @@ with st.sidebar:
         format_func=lambda e: EXCHANGE_LABELS[e],
     )
 
-# Daily LOCF series (or raw runs)
-if locf:
+if timeline == "Report as-of date":
+    series = build_asof_series(runs).rename(columns={"date": "when"})
+if timeline != "Report as-of date" or series.empty or "when" not in series:
     series = build_daily_series(runs).rename(columns={"date": "when"})
-else:
-    series = runs.rename(columns={"run_date": "when"})
 series = series.set_index("when")
 
 date_min, date_max = series.index.min().date(), series.index.max().date()
@@ -125,10 +131,12 @@ if failed or stale_flags:
         bits.append("carried forward: **" + ", ".join(s.replace("_stale", "").upper() for s in stale_flags) + "**")
     st.warning("⚠️ " + " · ".join(bits) + f"  \n_{latest.get('notes') or ''}_")
 
-as_of = " · ".join(
-    f"{EXCHANGE_LABELS[e]}: {pd.to_datetime(latest.get(f'{e}_data_date')).date() if pd.notna(latest.get(f'{e}_data_date')) else 'n/a'}"
-    for e in EXCHANGES
-)
+def _asof(e: str):
+    v = latest.get(EXCHANGE_DATE_COL[e])
+    return pd.to_datetime(v).date() if pd.notna(v) else None
+
+
+as_of = " · ".join(f"{EXCHANGE_LABELS[e]}: {_asof(e) or 'n/a'}" for e in EXCHANGES)
 st.caption(f"Last pipeline run **{latest['run_date'].date()}** — data as of: {as_of}")
 
 # --------------------------------------------------------------------------- #
@@ -180,8 +188,7 @@ for e in EXCHANGES:
         "Cancelled": latest.get(f"{e}_cancelled_t"),
         "Off-warrant": latest.get(f"{e}_off_warrant_t"),
         "Total": latest.get(f"{e}_total_t"),
-        "As of": pd.to_datetime(latest.get(f"{e}_data_date")).date()
-        if pd.notna(latest.get(f"{e}_data_date")) else None,
+        "As of": _asof(e),
     })
 breakdown = pd.DataFrame(rows).set_index("Exchange")
 num_cols = ["On-warrant", "Cancelled", "Off-warrant", "Total"]
@@ -191,8 +198,7 @@ st.dataframe(
     width="stretch",
 )
 st.caption(
-    "CME has no cancelled-warrant concept (0). SHFE does not report off-warrant; "
-    "its *Cancelled* column is the implied non-warranted portion (库存 − 仓单). "
+    "SHFE *Cancelled* column is the implied non-warranted portion (库存 − 仓单). "
     f"SHFE daily warrant (side feed): {fmt(latest.get('shfe_warrant_daily_t'), unit_div, unit_suffix)}"
     f" @ {pd.to_datetime(latest.get('shfe_warrant_daily_date')).date() if pd.notna(latest.get('shfe_warrant_daily_date')) else 'n/a'}."
 )

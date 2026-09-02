@@ -160,6 +160,36 @@ def test_parquet_upsert_and_locf(monkeypatch) -> None:
         print("test_parquet_upsert_and_locf: OK")
 
 
+def test_asof_series(monkeypatch) -> None:
+    """As-of series places each exchange at its own report date and starts there."""
+    from scripts.schema import build_asof_series
+
+    _patch_all(monkeypatch)
+    row = agg.collect()
+    row["run_date"] = dt.date(2026, 9, 2)
+    df = agg._row_to_frame(row)
+
+    a = build_asof_series(df, end=dt.date(2026, 9, 2)).set_index("date")
+    # fixture as-of dates: LME warrant 08-26, CME 08-28, SHFE weekly 08-28
+    assert a.index.min() == pd.Timestamp("2026-08-26")  # earliest = LME
+    assert a.index.max() == pd.Timestamp("2026-09-02")
+    # before 08-28 only LME contributes
+    assert pd.isna(a.loc["2026-08-27", "shfe_total_t"])
+    assert pd.isna(a.loc["2026-08-27", "cme_total_t"])
+    assert a.loc["2026-08-27", "lme_total_t"] == 235_575.0 + 117_155.0
+    # from 08-28 all three are on the timeline
+    assert a.loc["2026-08-28", "shfe_total_t"] == 72_428.0
+    assert a.loc["2026-08-28", "cme_total_t"] == round(758_889.0 * CONV, 3)
+    # global total re-summed from the aligned legs
+    assert a.loc["2026-09-02", "global_total_t"] == round(
+        a.loc["2026-09-02", "cme_total_t"]
+        + a.loc["2026-09-02", "lme_total_t"]
+        + a.loc["2026-09-02", "shfe_total_t"],
+        3,
+    )
+    print("test_asof_series: OK")
+
+
 if __name__ == "__main__":
     class _MP:
         def __init__(self): self._undo = []
@@ -172,7 +202,7 @@ if __name__ == "__main__":
             self._undo.clear()
 
     for fn in (test_harmonisation_and_global_total, test_carry_forward_on_failure,
-               test_strict_raises, test_parquet_upsert_and_locf):
+               test_strict_raises, test_parquet_upsert_and_locf, test_asof_series):
         mp = _MP()
         try:
             fn(mp)

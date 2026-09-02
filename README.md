@@ -82,4 +82,6 @@ value was carried forward. `global_*` columns sum the three exchanges
   reported. The **weekly** report is the source of truth; the daily warrant
   report rides along as `shfe_warrant_daily_t` only.
 - Missing days (holidays, blocked scrapes) are forward-filled (LOCF) for
-  charting by `scripts/schema.build_daily_series`.
+  charting: `scripts/schema.build_daily_series` (x-axis = pipeline run date) and
+  `build_asof_series` (x-axis = each report's own as-of date, staggered by lag —
+  the dashboard default).

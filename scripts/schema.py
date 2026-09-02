@@ -33,6 +33,17 @@ DATE_COLS: set[str] = {
     "shfe_data_date", "shfe_warrant_daily_date",
 }
 
+# Which column holds each exchange's report as-of date, and its value columns.
+ASOF_SPEC: dict[str, tuple[str, list[str]]] = {
+    "cme": ("cme_data_date",
+            ["cme_on_warrant_t", "cme_cancelled_t", "cme_off_warrant_t", "cme_total_t"]),
+    "lme": ("lme_warrant_data_date",
+            ["lme_on_warrant_t", "lme_cancelled_t", "lme_off_warrant_t", "lme_total_t"]),
+    "shfe": ("shfe_data_date",
+             ["shfe_on_warrant_t", "shfe_cancelled_t", "shfe_off_warrant_t", "shfe_total_t"]),
+}
+EXCHANGE_DATE_COL: dict[str, str] = {ex: dcol for ex, (dcol, _) in ASOF_SPEC.items()}
+
 
 def build_daily_series(
     df: pd.DataFrame,
@@ -62,4 +73,68 @@ def build_daily_series(
     ]
     out = work[cols].reindex(calendar).ffill()
     out.index.name = "date"
+    return out.reset_index()
+
+
+def build_asof_series(df: pd.DataFrame, *, end: dt.date | None = None) -> pd.DataFrame:
+    """Daily series indexed by each exchange's **report as-of date**, not run date.
+
+    Every exchange is placed on the timeline at the date its report is *for*
+    (LME ~T+2, CME ~T+1, SHFE = the report Friday), then forward-filled. When
+    two runs cover the same as-of date, the later run wins. The ``global_*``
+    columns are re-summed from the aligned per-exchange values, so a source that
+    only has recent history simply starts its contribution later (min_count=1 —
+    the total is NaN only where no exchange has data yet).
+
+    Index runs from the earliest as-of date across all exchanges to ``end``
+    (default today). Returns a frame with a ``date`` column.
+    """
+    if df.empty:
+        return df.copy()
+
+    end_ts = pd.Timestamp(end or dt.date.today())
+    runs = df.sort_values("run_date")  # later run wins on same as-of date
+
+    frames: dict[str, tuple[pd.DataFrame, list[str]]] = {}
+    starts: list[pd.Timestamp] = []
+    for ex, (dcol, vcols) in ASOF_SPEC.items():
+        have = [c for c in vcols if c in runs.columns]
+        if dcol not in runs.columns or not have:
+            continue
+        sub = runs[[dcol, *have]].copy()
+        sub[dcol] = pd.to_datetime(sub[dcol], errors="coerce")
+        sub = sub.dropna(subset=[dcol]).drop_duplicates(subset=[dcol], keep="last")
+        if sub.empty:
+            continue
+        sub = sub.sort_values(dcol).set_index(dcol)
+        frames[ex] = (sub, have)
+        starts.append(sub.index.min())
+
+    if not starts:
+        return pd.DataFrame(columns=["date"])
+
+    last = max([f[0].index.max() for f in frames.values()] + [end_ts])
+    calendar = pd.date_range(min(starts), last, freq="D")
+    out = pd.DataFrame(index=calendar)
+    out.index.name = "date"
+    # Always emit every value column (NaN if that exchange has no data yet), so
+    # downstream column selection never KeyErrors.
+    for _dcol, vcols in ASOF_SPEC.values():
+        for c in vcols:
+            out[c] = float("nan")
+    for _ex, (sub, have) in frames.items():
+        filled = sub.reindex(calendar).ffill()
+        for c in have:
+            out[c] = filled[c]
+
+    def _sum(cols: list[str]) -> pd.Series:
+        present = [c for c in cols if c in out.columns]
+        if not present:
+            return pd.Series(index=out.index, dtype="float64")
+        return out[present].sum(axis=1, min_count=1)
+
+    out["global_on_warrant_t"] = _sum(["cme_on_warrant_t", "lme_on_warrant_t", "shfe_on_warrant_t"])
+    out["global_cancelled_t"] = _sum(["cme_cancelled_t", "lme_cancelled_t", "shfe_cancelled_t"])
+    out["global_off_warrant_t"] = _sum(["cme_off_warrant_t", "lme_off_warrant_t"])  # SHFE: none
+    out["global_total_t"] = _sum(["cme_total_t", "lme_total_t", "shfe_total_t"])
     return out.reset_index()
