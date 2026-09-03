@@ -120,9 +120,14 @@ with st.sidebar:
 latest = runs.iloc[-1]
 prev = runs.iloc[-2] if len(runs) > 1 else None
 
-# Business-day, forward-filled series — used for day-over-day so "T-1" is always
-# the previous business day, regardless of gaps between pipeline-run rows.
+# One forward-filled business-day frame covering inventory (as-of) + prices
+# (run-date), used for every day-over-day calculation.
 _dod_series = build_asof_series(runs).set_index("date")
+_price_cols = [c for c in runs.columns if c.endswith(("_usd_t", "_usd_lb"))]
+if _price_cols:
+    _dod_series = _dod_series.join(
+        build_daily_series(runs).set_index("date")[_price_cols], how="outer"
+    ).ffill()
 
 
 def _asof(e: str):
@@ -131,24 +136,24 @@ def _asof(e: str):
 
 
 def dod(col: str) -> tuple[float | None, float | None]:
-    """Absolute + % change of `col`: latest date vs T-1 (previous business day).
-
-    Uses the forward-filled as-of series; falls back to the last two run rows for
-    columns it doesn't carry (e.g. the price legs)."""
-    if col in _dod_series.columns and len(_dod_series) >= 2:
-        cur, prv = _dod_series[col].iloc[-1], _dod_series[col].iloc[-2]
-    else:
-        cur = latest.get(col)
-        prv = prev.get(col) if prev is not None else None
-    if prv is None or pd.isna(cur) or pd.isna(prv):
+    """Change of `col` = latest value minus the previous *different* value on the
+    forward-filled daily series (i.e. the last actual move, not "today vs an
+    identical yesterday")."""
+    if col not in _dod_series.columns:
         return None, None
-    d = float(cur) - float(prv)
+    vals = _dod_series[col].dropna()
+    if vals.empty:
+        return None, None
+    cur = float(vals.iloc[-1])
+    earlier = vals[vals != vals.iloc[-1]]
+    prv = float(earlier.iloc[-1]) if not earlier.empty else cur  # flat window -> 0 change
+    d = cur - prv
     if d == 0:
-        pct = 0.0                              # unchanged -> +0.0%, even from a zero base
-    elif float(prv) != 0:
-        pct = d / float(prv) * 100.0
+        pct = 0.0
+    elif prv != 0:
+        pct = d / prv * 100.0
     else:
-        pct = None                            # moved off a zero base -> % undefined
+        pct = None
     return d, pct
 
 
@@ -319,12 +324,19 @@ if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
         "Positive = COMEX above LME. Sources: CME Group, Westmetall."
     )
 
-    _sp = build_daily_series(runs).set_index("date")[["cme_lme_spread_3m_usd_t"]].dropna()
-    if not _sp.empty:
-        _sp = _sp.loc[_sp.ne(_sp.shift()).any(axis=1)]
-        _sp.columns = ["CME − LME 3-month"]
-        _sp.index = _sp.index.strftime("%Y-%m-%d")
-        st.line_chart(_sp, height=280, y_label="USD/t", x_label="date")
+    # Continuous line — one point per pipeline run that recorded a spread; the
+    # line extends each day as new settlements land.
+    _sp = (
+        runs.dropna(subset=["cme_lme_spread_3m_usd_t"])
+        .assign(when=lambda d: pd.to_datetime(d["run_date"]))
+        .set_index("when")[["cme_lme_spread_3m_usd_t"]]
+        .sort_index()
+        .rename(columns={"cme_lme_spread_3m_usd_t": "CME − LME 3-month (USD/t)"})
+    )
+    _sp.index = _sp.index.strftime("%Y-%m-%d")
+    st.line_chart(_sp, height=300, y_label="USD/t", x_label="date")
+    if len(_sp) < 2:
+        st.caption(f"{len(_sp)} data point so far — the line fills in as the daily pipeline runs.")
 else:
     st.info("No CME–LME price data yet — populates from the next pipeline run.")
 
