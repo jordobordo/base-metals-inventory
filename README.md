@@ -26,11 +26,14 @@ Data Architecture and Workflow
 | `scripts/cme_scraper.py`  | CME (COMEX) `Copper_Stocks.xls` — Registered / Eligible (short tons); Chrome-impersonation transport (`curl_cffi`) with a plain-`requests` fallback to get past the `/delivery_reports/` datacentre-IP block |
 | `scripts/lme_scraper.py`  | LME stock-breakdown (live + cancelled warrants, plus the per-location / per-country breakdown) + OWSR (off-warrant, plus the ASIA/EUROPE/NORTH AMERICAS region totals), via the reports JSON API behind Cloudflare (`curl_cffi`) |
 | `scripts/shfe_scraper.py` | SHFE weekly stock report (库存 + 仓单) + daily warrant report (side feed) |
-| `scripts/price_scraper.py`| COMEX copper (Yahoo `HG=F`, USD/lb) vs LME cash + 3-month (Westmetall, USD/t) → CME−LME spread + LME cash−3M term-structure spread, all USD/t |
+| `scripts/price_scraper.py`| COMEX copper (CME settlements API, most-active month, USD/lb; Yahoo `HG=F` fallback) vs LME cash + 3-month (Westmetall `LME_Cu_cash` table, USD/t — sole LME source) → CME−LME spread + LME cash−3M term-structure spread, all USD/t |
 | `scripts/aggregate.py`    | runs all scrapers, converts CME short tons ×0.907185, harmonises, computes the global total, upserts `data/copper_inventory.parquet` and (best-effort) `data/lme_geo.parquet` |
 | `scripts/schema.py`       | shared column schema + inventory taxonomy + LOCF daily-calendar helper; `staleness()`, the exchange-native as-of series, and the tidy geo-parquet upsert |
 | `scripts/backfill.py`     | one-off: recover ~2 weeks of history each source still exposes |
-| `app.py`                  | Streamlit dashboard |
+| `scripts/analytics.py`    | scarcity-vs-reshuffling analytics: warrant-lifecycle / "phantom tightness" flows, rolling 30/90-day Z-score anomaly scan, configurable CME–LME arbitrage-hurdle model, hub concentration / load-out response / `diagnose_anomalies`, and a combined `scarcity_scorecard` |
+| `app.py`                  | Streamlit dashboard — overview page |
+| `pages/1_Scarcity_Analysis.py` | Streamlit dashboard — "Physical vs Paper Scarcity" page (KPI row, spatial concentration, warrant-vs-load-out, term-structure/arb band with an adjustable cost hurdle, anomaly table) |
+| `views/`                  | render helpers for the pages (`common.py` loaders, `scarcity.py` charts) |
 | `.github/workflows/daily.yml` | daily cron: run aggregator, commit the parquet back |
 | `tests/`                  | offline parser tests + fixtures (no network) |
 
@@ -163,3 +166,64 @@ off_warrant_t, retrieved_at`; dedupe key is
 `report_date + report_type + region + location`. The dashboard's **LME by
 location** section reads it; if the file is missing the section shows a hint and
 the rest of the app is unaffected.
+
+## Scarcity vs. reshuffling analytics (`scripts/analytics.py`)
+
+Is a stock drawdown real metal leaving, or warrants being churned / financed?
+`python scripts/analytics.py` prints the read; the functions also import cleanly
+(pandas + numpy only). It reads both parquets and has three layers:
+
+1. **Warrant lifecycle & "phantom tightness"** — `location_warrant_flows(geo,
+   level=…)` decomposes each LME location's period-over-period move into fresh
+   cancellations vs. actual load-out (`delivered_out_t`), an
+   `implied_rewarrant_t` (cancelled tonnage that went back on warrant instead of
+   physically leaving), a `cancellation_drawdown_ratio`, and boolean
+   `is_rewarranting` / `phantom_tightness` flags. `cancelled_share(on, canc)` =
+   `canc / (on + canc) * 100`. Re-warranting and phantom flags are per-location
+   by design — a global roll-up hides one shed's churn behind another's load-out.
+2. **Anomaly detection** — `rolling_zscore(series, 30|90)` (calendar-day window
+   when the index is datetime, `ddof=0`, zero-variance → NaN not ∞);
+   `zscore_frame` adds `z30d/z90d` + `alert_*` at `abs(z) > 2.0`; `anomaly_scan`
+   bundles daily net cancellations and load-outs by location plus the LME
+   cash-to-3M spread.
+3. **Arbitrage hurdle** — `ArbCostBand(freight_usd_mt, finance_insurance_usd_mt,
+   tariff_pct, tariff_basis)` defines the transfer cost; `net_arb_margin =
+   (cme_price_mt − lme_3m_price_mt) − transfer_cost`; `classify_arb_regime`
+   returns **"Open Physical Arb"** (net > 0), **"Paper Dislocation"** (gross
+   spread > 0 but inside the cost band) or **"No Dislocation"**. CLI flags:
+   `--freight`, `--finance`, `--tariff-pct`.
+
+`scarcity_scorecard(runs, geo, band=…)` folds these into a signed score in
+`[-1, 1]` (−1 = warehouse reshuffling / financing, +1 = physical scarcity) with a
+plain-language `verdict` and `rationale`. Sparse history ⇒ an honest
+"Mixed / inconclusive".
+
+Dashboard helpers on top of the three layers: `hub_of` / `hub_warrant_status` /
+`cancellation_concentration` bucket LME delivery points into hubs (Singapore,
+Rotterdam, Busan, Port Klang, US, Other) and measure where the cancelled tonnage
+sits; `loadout_response` flags cancellation spikes that produced < 50% load-out
+within 10 trading days; `net_draw_rate` is the business-day inventory draw rate;
+`diagnose_anomalies` returns the per-location alert table with an automated
+interpretation tag (`_interpret_anomaly`: *Isolated Cancellation – Low Physical
+Drain*, *Broad Regional Tightening*, *Transpacific Arb Delivery Candidate*,
+*Active Physical Load-Out*, *Re-warranting / Paper Hold*, *Watch*).
+
+## Scarcity Analysis page
+
+`streamlit run app.py` now has two pages; **Physical vs Paper Scarcity**
+(`pages/1_Scarcity_Analysis.py`) is the institutional view:
+
+- **KPI row** — Total Reported / On-Warrant / Cancelled / Off-Warrant, plus
+  *market temperature*: LME Cash–3M (labelled Backwardation / Contango) and
+  CME–LME 3M (labelled Arb Open / Closed against the cost hurdle).
+- **LME spatial concentration** — On-warrant vs Cancelled stacked bars per hub,
+  with the top-location / top-hub share of global cancellations.
+- **Warrant dynamics vs physical load-out** — dual-axis Δ-cancelled-warrants vs
+  gross Delivered-Out, with ▲ markers on cancellation spikes that never loaded out.
+- **Term structure & arb band** — LME Cash–3M vs the inventory draw rate, and the
+  CME–LME spread with a shaded transfer-cost band that moves with the sidebar
+  **freight / finance+insurance / import-tariff** sliders.
+- **Anomaly & diagnostics** — the `diagnose_anomalies` table.
+
+Time-series and Z-score sections show a "builds as the pipeline runs" placeholder
+until `data/lme_geo.parquet` has accumulated enough per-location history.
