@@ -430,7 +430,7 @@ if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
         f"LME 3-month. **LME cash − 3M**: LME term structure (positive = "
         f"backwardation). As of {pd.to_datetime(cpx_d).date() if pd.notna(cpx_d) else 'n/a'} "
         f"(COMEX) / {pd.to_datetime(lme_d).date() if pd.notna(lme_d) else 'n/a'} (LME). "
-        "Sources: CME Group, lme.com, Westmetall."
+        "Sources: CME Group (COMEX settle), Westmetall (LME cash + 3-month)."
     )
 
     _spread_cols = {
@@ -546,8 +546,7 @@ with st.expander("Sources"):
 **LME**
 - [Stock breakdown report](https://www.lme.com/market-data/reports-and-data/warehouse-and-stocks-reports/stock-breakdown-report?page=1&DateFacet=Last+7+days) — live + cancelled warrants
 - [Off-warrant stock reporting](https://www.lme.com/market-data/reports-and-data/warehouse-and-stocks-reports/off-warrant-stock-reporting?page=1&DateFacet=Last+7+days)
-- [LME Copper](https://www.lme.com/en/metals/non-ferrous/lme-copper) — day-delayed Closing 3-month + Official cash prices
-- [Westmetall market data](https://www.westmetall.com/en/markdaten.php) — LME price fallback
+- [Westmetall market data](https://www.westmetall.com/en/markdaten.php) — LME Copper cash-settlement + 3-month price (the price leg)
 
 **SHFE**
 - [Weekly stock report / 库存周报](https://www.shfe.com.cn/eng/reports/StatisticalData/WeeklyData/?query_params=weeklystock)

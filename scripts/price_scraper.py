@@ -15,10 +15,12 @@ Sources (both free, no key):
                    take the **most-active** month (highest open interest — usually
                    the Dec/quarterly, not the near-expiry front) for the previous
                    trading day. Falls back to Yahoo ``HG=F`` if CME blocks the runner.
-  * LME copper   : lme.com day-delayed trading-data API — the **Closing 3-month
-                   price** (what the LME website shows, e.g. 14,274.50) plus the
-                   Official cash price. curl_cffi (Cloudflare). Falls back to the
-                   Westmetall table (LME Official prices) if lme.com is unreachable.
+                   (Westmetall carries no COMEX data, so this leg has no
+                   Westmetall path.)
+  * LME copper   : the Westmetall "LME_Cu_cash" table — LME Copper
+                   Cash-Settlement + 3-month, one row per trading day. Plain HTML,
+                   no Cloudflare, and it is already the reference the rest of the
+                   repo sanity-checks ``lme_total_t`` against.
 
 Both legs soft-fail independently; :func:`get_cme_lme_copper_spread` returns
 whatever it could get and only fills the spread when both legs are present
@@ -58,6 +60,8 @@ LB_PER_TONNE = 2204.6226218488
 YAHOO_HOSTS = ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com")
 YAHOO_CHART = "/v8/finance/chart/HG=F?range=1mo&interval=1d"
 WESTMETALL_LME_CU = "https://www.westmetall.com/en/markdaten.php?action=table&field=LME_Cu_cash"
+# Westmetall daily rows quote the LME Official (settlement) cash + 3-month; the
+# table is 6 months deep, more than enough to pick "latest before the cutoff".
 
 # CME Group settlements API — product 438 = Copper.
 CME_COPPER_SETTLE_URL = (
@@ -66,12 +70,6 @@ CME_COPPER_SETTLE_URL = (
 )
 CME_REFERER = "https://www.cmegroup.com/markets/metals/base/copper.settlements.html"
 _MONTH_CODE = "FGHJKMNQUVXZ"  # Jan..Dec
-
-# LME day-delayed trading-data API (drives the tables on lme.com/.../lme-copper).
-LME_COPPER_PAGE = "https://www.lme.com/en/metals/non-ferrous/lme-copper"
-LME_DAYDELAYED_URL = "https://www.lme.com/api/trading-data/day-delayed?datasourceId={ds}"
-LME_CU_CLOSING_DS = "2a431297-6620-4ba7-a991-8335423f994b"   # "LME Copper Closing Prices"
-LME_CU_OFFICIAL_DS = "762a3883-b0e1-4c18-b34b-fe97a1f2d3a5"  # "LME Copper Official Prices"
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -105,7 +103,7 @@ class LmeCopperPrice:
     price_date: dt.date
     cash_usd_per_tonne: float | None
     three_month_usd_per_tonne: float | None
-    source: str = "LME closing"
+    source: str = "Westmetall"
 
 
 # --------------------------------------------------------------------------- #
@@ -201,96 +199,46 @@ def get_comex_copper_price(*, before: dt.date | None = None) -> ComexCopperPrice
 
 
 # --------------------------------------------------------------------------- #
-# LME  (lme.com day-delayed API — closing + official prices)
+# LME  (Westmetall "LME_Cu_cash" table — LME Official cash + 3-month)
 # --------------------------------------------------------------------------- #
-def _lme_daydelayed(datasource_id: str) -> dict[str, Any]:
-    if cffi_requests is None:  # pragma: no cover
-        raise PriceScraperError("curl_cffi is required for the LME price feed")
-    r = cffi_requests.get(
-        LME_DAYDELAYED_URL.format(ds=datasource_id), impersonate="chrome",
-        timeout=DEFAULT_TIMEOUT,
-        headers={"Accept": "application/json", "Referer": LME_COPPER_PAGE},
-    )
-    if r.status_code != 200 or r.content[:1] != b"{":
-        raise PriceScraperError(f"LME day-delayed HTTP {r.status_code} for {datasource_id}")
-    return r.json()
-
-
-def _lme_row_value(payload: dict[str, Any], row_title: str) -> float | None:
-    for row in payload.get("Rows", []):
-        if str(row.get("RowTitle", "")).strip().lower() == row_title.lower():
-            vals = row.get("Values") or []
-            for v in reversed(vals):  # [bid, offer] -> take offer; [price] -> take it
-                f = _to_price(str(v))
-                if f is not None and 1000 < f < 60000:
-                    return f
-    return None
-
-
-def _lme_from_website(cutoff: dt.date) -> LmeCopperPrice:
-    """LME Copper Closing 3-month (+ Official cash) from lme.com's day-delayed API."""
-    closing = _lme_daydelayed(LME_CU_CLOSING_DS)
-    official = None
-    try:
-        official = _lme_daydelayed(LME_CU_OFFICIAL_DS)
-    except PriceScraperError as exc:
-        log.warning("LME official prices unavailable: %s", exc)
-
-    m3 = _lme_row_value(closing, "3-month")
-    if m3 is None and official is not None:
-        m3 = _lme_row_value(official, "3-month")
-    cash = _lme_row_value(official, "Cash") if official else None
-    if m3 is None and cash is None:
-        raise PriceScraperError("LME day-delayed: no 3-month or cash price parsed")
-
-    d = _parse_iso_date(closing.get("DateOfData")) or _parse_iso_date(
-        (official or {}).get("DateOfData")
-    ) or (cutoff - dt.timedelta(days=1))
-    log.info("LME copper %s [lme.com day-delayed]: 3m-close %s, cash %s", d, m3, cash)
-    return LmeCopperPrice(price_date=d, cash_usd_per_tonne=cash,
-                          three_month_usd_per_tonne=m3, source="LME closing")
-
-
-def _lme_from_westmetall(cutoff: dt.date) -> LmeCopperPrice:
-    """Fallback: Westmetall table (LME Official cash + 3-month)."""
+def _fetch_westmetall(url: str) -> str:
+    """GET a Westmetall market-data page. curl_cffi if present, else plain
+    ``requests`` (the site is plain HTML with no bot wall, so either works)."""
+    headers = {"User-Agent": _UA, "Accept": "text/html,*/*;q=0.8"}
+    if cffi_requests is not None:
+        try:
+            r = cffi_requests.get(url, impersonate="chrome", timeout=DEFAULT_TIMEOUT, headers=headers)
+            if r.status_code == 200 and "<tr" in r.text.lower():
+                return r.text
+            log.warning("Westmetall via curl_cffi: HTTP %s / no table; trying requests", r.status_code)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Westmetall via curl_cffi failed (%s); trying requests", exc)
     if requests is None:  # pragma: no cover
-        raise PriceScraperError("the 'requests' package is required for the Westmetall fallback")
+        raise PriceScraperError("no HTTP client available for the Westmetall feed")
     sess = requests.Session()
-    sess.headers.update({"User-Agent": _UA, "Accept": "text/html,*/*;q=0.8"})
+    sess.headers.update(headers)
     try:
-        r = sess.get(WESTMETALL_LME_CU, timeout=DEFAULT_TIMEOUT)
+        r = sess.get(url, timeout=DEFAULT_TIMEOUT)
         if r.status_code != 200 or "<tr" not in r.text.lower():
             raise PriceScraperError(f"Westmetall HTTP {r.status_code} / no table")
-        rows = [row for row in _parse_westmetall(r.text) if row[0] < cutoff]
-        if not rows:
-            raise PriceScraperError(f"Westmetall: no LME row before {cutoff}")
-        d, cash, m3 = rows[0]
-        log.info("LME copper %s [Westmetall]: cash %.2f, 3m %s", d, cash, m3)
-        return LmeCopperPrice(price_date=d, cash_usd_per_tonne=cash,
-                              three_month_usd_per_tonne=m3, source="Westmetall")
+        return r.text
     finally:
         sess.close()
 
 
 def get_lme_copper_price(*, before: dt.date | None = None) -> LmeCopperPrice:
-    """Previous trading day's LME copper price. Primary: lme.com day-delayed API —
-    Closing 3-month price (matches the LME website) + Official cash. Falls back to
-    the Westmetall table if lme.com is unreachable."""
+    """Previous trading day's LME copper price from the Westmetall ``LME_Cu_cash``
+    table: LME Copper Cash-Settlement + 3-month, latest row strictly before the
+    cutoff. This is the single LME price source (no lme.com path)."""
     cutoff = before or dt.datetime.now(dt.timezone.utc).date()
-    try:
-        return _lme_from_website(cutoff)
-    except PriceScraperError as exc:
-        log.warning("LME: lme.com day-delayed failed (%s); falling back to Westmetall", exc)
-        return _lme_from_westmetall(cutoff)
-
-
-def _parse_iso_date(s: str | None) -> dt.date | None:
-    if not s:
-        return None
-    try:
-        return dt.datetime.fromisoformat(s.replace("Z", "+00:00")).date()
-    except ValueError:
-        return None
+    html = _fetch_westmetall(WESTMETALL_LME_CU)
+    rows = [row for row in _parse_westmetall(html) if row[0] < cutoff]
+    if not rows:
+        raise PriceScraperError(f"Westmetall: no LME copper row before {cutoff}")
+    d, cash, m3 = rows[0]
+    log.info("LME copper %s [Westmetall]: cash %.2f, 3m %s", d, cash, m3)
+    return LmeCopperPrice(price_date=d, cash_usd_per_tonne=cash,
+                          three_month_usd_per_tonne=m3, source="Westmetall")
 
 
 def _parse_westmetall(html: str) -> list[tuple[dt.date, float, float | None]]:

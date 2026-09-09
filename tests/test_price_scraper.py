@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import sys
 from pathlib import Path
 
@@ -13,7 +14,6 @@ from scripts.price_scraper import (  # noqa: E402
     LB_PER_TONNE,
     ComexCopperPrice,
     _contract_code,
-    _lme_row_value,
     _parse_westmetall,
     _parse_westmetall_date,
     _to_price,
@@ -70,26 +70,21 @@ def test_cme_settlement_parsing() -> None:
     print("test_cme_settlement_parsing: OK")
 
 
-def test_lme_row_value() -> None:
-    closing = {"Rows": [
-        {"RowTitle": "3-month", "Values": ["14274.50"]},
-        {"RowTitle": "Sep 26", "Values": ["14426.14"]},
-    ]}
-    official = {"Rows": [
-        {"RowTitle": "Cash", "Values": ["14395.00", "14395.50"]},   # [bid, offer] -> offer
-        {"RowTitle": "3-month", "Values": ["14213.00", "14215.00"]},
-    ]}
-    assert _lme_row_value(closing, "3-month") == 14274.50
-    assert _lme_row_value(official, "Cash") == 14395.50
-    assert _lme_row_value(official, "3-month") == 14215.00
-    assert _lme_row_value(closing, "Cash") is None
-    print("test_lme_row_value: OK")
+def test_westmetall_is_sole_lme_source() -> None:
+    """The lme.com day-delayed path is gone — Westmetall is the only LME feed."""
+    import scripts.price_scraper as ps
+
+    for removed in ("_lme_from_website", "_lme_daydelayed", "_lme_row_value"):
+        assert not hasattr(ps, removed), f"{removed} should have been removed"
+    src = inspect.getsource(ps.get_lme_copper_price)
+    assert "_fetch_westmetall" in src and "_lme_daydelayed" not in src
+    print("test_westmetall_is_sole_lme_source: OK")
 
 
 if __name__ == "__main__":
     test_parse_westmetall()
     test_parse_date_and_price()
     test_cme_settlement_parsing()
-    test_lme_row_value()
+    test_westmetall_is_sole_lme_source()
     test_lb_to_tonne_conversion()
     print("\nAll offline price-scraper tests passed.")
