@@ -88,7 +88,9 @@ __all__ = [
     "download_lme_report",
     "download_lme_stock_breakdown",
     "parse_lme_stock_breakdown",
+    "parse_lme_stock_breakdown_locations",
     "parse_lme_offwarrant",
+    "parse_lme_offwarrant_regions",
     "LMECopperWarrants",
     "LMECopperOffWarrant",
     "LMEScraperError",
@@ -412,6 +414,109 @@ def parse_lme_stock_breakdown(
     return rec
 
 
+def parse_lme_stock_breakdown_locations(
+    content: bytes,
+    *,
+    metal: str = _METAL_DEFAULT,
+    report_date: dt.date | None = None,
+    source_report_name: str = "",
+) -> list[dict[str, Any]]:
+    """Per-Location / per-Country rows of the metal's section in 'Metals Totals
+    Report' (everything between the header and the 'Total' row). Metric tonnes.
+    """
+    if not content:
+        raise LMEParseError("empty payload")
+    try:
+        book = pd.read_excel(io.BytesIO(content), sheet_name=None, header=None, engine="xlrd")
+    except Exception:
+        book = pd.read_excel(io.BytesIO(content), sheet_name=None, header=None, engine="openpyxl")
+
+    grid = _as_str_grid(_pick_totals_sheet(book))
+    sec_start, sec_end = _find_metal_section(grid, metal)
+    col = _find_columns(grid, sec_start, sec_end)
+    total_row = _find_total_row(grid, sec_start, sec_end)
+
+    # header row = the one _find_columns matched on
+    hdr = next(
+        i for i in range(sec_start, min(sec_end, sec_start + 8))
+        if "open tonnage" in " | ".join(grid[i]).lower()
+        and "cancelled tonnage" in " | ".join(grid[i]).lower()
+    )
+    if report_date is None:
+        report_date = _date_from_name(source_report_name)
+
+    out: list[dict[str, Any]] = []
+    country = ""
+    for r in range(hdr + 1, total_row):
+        row = grid[r]
+        if not row or not any(row):
+            continue
+        c0 = row[0].strip() if row[0] else ""
+        loc = row[1].strip() if len(row) > 1 and row[1] else ""
+        if c0:
+            country = c0
+        if not loc:
+            continue
+
+        def _v(key: str) -> float | None:
+            j = col.get(key)
+            return _to_number(row[j]) if j is not None and j < len(row) else None
+
+        rec = {
+            "country": country,
+            "location": loc,
+            "on_warrant_t": _v("open"),
+            "cancelled_t": _v("cancelled"),
+            "opening_t": _v("opening"),
+            "delivered_in_t": _v("delivered_in"),
+            "delivered_out_t": _v("delivered_out"),
+            "closing_t": _v("closing"),
+            "report_date": report_date,
+        }
+        out.append(rec)
+    return out
+
+
+def parse_lme_offwarrant_regions(
+    content: bytes,
+    *,
+    metal: str = _METAL_DEFAULT,
+    report_date: dt.date | None = None,
+    source_report_name: str = "",
+) -> list[dict[str, Any]]:
+    """The regional subtotal rows of the OWSR report for the metal's column:
+    TOTAL ASIA / TOTAL EUROPE / TOTAL NORTH AMERICAS / GLOBAL TOTAL.
+    """
+    if not content:
+        raise LMEParseError("empty OWSR payload")
+    code = _OWSR_METAL_CODES.get(metal, metal.strip().upper())
+    book = pd.read_excel(io.BytesIO(content), sheet_name=None, header=None, engine="openpyxl")
+    df = next(
+        (d for n, d in book.items() if "reconciled" in str(n).lower() or "owsr" in str(n).lower()),
+        next(iter(book.values()), None),
+    )
+    grid = _as_str_grid(df)
+    hdr_idx = col_idx = None
+    for i, row in enumerate(grid[:12]):
+        upper = [c.strip().upper() for c in row]
+        if "REGION" in upper and code in upper:
+            hdr_idx, col_idx = i, upper.index(code)
+            break
+    if col_idx is None:
+        raise LMEParseError(f"OWSR: header row with a {code!r} column not found")
+    if report_date is None:
+        report_date = _date_from_name(source_report_name)
+
+    out: list[dict[str, Any]] = []
+    for row in grid[hdr_idx + 1:]:
+        c0 = (row[0] if row else "").strip().upper()
+        if c0.startswith(("TOTAL ", "GLOBAL TOTAL")):
+            val = _to_number(row[col_idx]) if col_idx < len(row) else None
+            region = c0.replace("TOTAL ", "").replace(" TOTAL", "").strip() or "GLOBAL"
+            out.append({"region": region, "off_warrant_t": val, "report_date": report_date})
+    return out
+
+
 def _pick_totals_sheet(book: dict[str, pd.DataFrame]) -> pd.DataFrame:
     for name, df in book.items():
         if _TOTALS_SHEET_HINT.lower() in str(name).lower():
@@ -577,11 +682,14 @@ def get_lme_copper_warrants(
     max_reports_to_try: int = DEFAULT_MAX_REPORTS_TO_TRY,
     config_id: str = STOCK_BREAKDOWN_CONFIG_ID,
     impersonate: str = DEFAULT_IMPERSONATE,
+    with_locations: bool = False,
 ) -> dict[str, Any]:
     """List -> download -> parse the newest good stock-breakdown report.
 
-    Returns the raw metric-tonne record dict. Raises :class:`LMEBlockedError`
-    if Cloudflare blocks us, :class:`LMEParseError` if no report parses.
+    Returns the raw metric-tonne record dict. With ``with_locations=True`` the
+    record also carries ``rec["locations"]`` (per-Location breakdown) parsed from
+    the *same* downloaded file. Raises :class:`LMEBlockedError` if Cloudflare
+    blocks us, :class:`LMEParseError` if no report parses.
     """
     retrieved_at = dt.datetime.now(dt.timezone.utc)
     sess = _new_session(impersonate)
@@ -594,14 +702,21 @@ def get_lme_copper_warrants(
         for item in reports[:max_reports_to_try]:
             try:
                 content, filename = download_lme_stock_breakdown(item["item_id"], session=sess)
+                rd = item["report_date"] or _date_from_name(filename)
+                name = item["name"] or filename
                 rec = parse_lme_stock_breakdown(
-                    content,
-                    report_date=item["report_date"] or _date_from_name(filename),
-                    source_report_name=item["name"] or filename,
-                    metal=metal,
-                    retrieved_at=retrieved_at,
-                )
-                return rec.as_record()
+                    content, report_date=rd, source_report_name=name,
+                    metal=metal, retrieved_at=retrieved_at,
+                ).as_record()
+                if with_locations:
+                    try:
+                        rec["locations"] = parse_lme_stock_breakdown_locations(
+                            content, metal=metal, report_date=rd, source_report_name=name,
+                        )
+                    except LMEScraperError as exc:
+                        log.warning("LME: per-location parse failed: %s", exc)
+                        rec["locations"] = []
+                return rec
             except LMEBlockedError:
                 raise
             except LMEScraperError as exc:
@@ -716,8 +831,13 @@ def get_lme_copper_offwarrant(
     max_reports_to_try: int = DEFAULT_MAX_REPORTS_TO_TRY,
     config_id: str = OFF_WARRANT_CONFIG_ID,
     impersonate: str = DEFAULT_IMPERSONATE,
+    with_regions: bool = False,
 ) -> dict[str, Any]:
-    """List -> download -> parse the newest good Daily_OWSR off-warrant report."""
+    """List -> download -> parse the newest good Daily_OWSR off-warrant report.
+
+    With ``with_regions=True`` the record also carries ``rec["regions"]`` (the
+    Asia / Europe / N. Americas / GLOBAL subtotals) from the same file.
+    """
     retrieved_at = dt.datetime.now(dt.timezone.utc)
     sess = _new_session(impersonate)
     try:
@@ -731,14 +851,21 @@ def get_lme_copper_offwarrant(
         for item in reports[:max_reports_to_try]:
             try:
                 content, filename = download_lme_report(item["item_id"], session=sess)
+                rd = item["report_date"] or _date_from_name(filename)
+                name = item["name"] or filename
                 rec = parse_lme_offwarrant(
-                    content,
-                    report_date=item["report_date"] or _date_from_name(filename),
-                    source_report_name=item["name"] or filename,
-                    metal=metal,
-                    retrieved_at=retrieved_at,
-                )
-                return rec.as_record()
+                    content, report_date=rd, source_report_name=name,
+                    metal=metal, retrieved_at=retrieved_at,
+                ).as_record()
+                if with_regions:
+                    try:
+                        rec["regions"] = parse_lme_offwarrant_regions(
+                            content, metal=metal, report_date=rd, source_report_name=name,
+                        )
+                    except LMEScraperError as exc:
+                        log.warning("LME: OWSR region parse failed: %s", exc)
+                        rec["regions"] = []
+                return rec
             except LMEBlockedError:
                 raise
             except LMEScraperError as exc:

@@ -18,3 +18,5 @@ pyarrow>=16.0
 
 # Dashboard (STEP 5) — Streamlit Community Cloud reads this same file
 streamlit>=1.43
+# Hand-built charts (ships with Streamlit, pinned so the app.py specs are stable)
+altair>=5

@@ -27,7 +27,7 @@ SCHEMA: list[str] = [
     "global_reported_stock_t", "global_total_t",
     # Prices — CME (COMEX) vs LME copper, USD (previous completed session)
     "comex_copper_usd_lb", "comex_copper_usd_t", "comex_price_date", "comex_contract",
-    "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_price_date",
+    "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_cash_3m_spread_usd_t", "lme_price_date",
     "cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t", "price_stale",
     # Provenance
     "sources_ok", "sources_failed", "notes",
@@ -48,6 +48,56 @@ ASOF_SPEC: dict[str, tuple[str, list[str]]] = {
              ["shfe_on_warrant_t", "shfe_cancelled_t", "shfe_off_warrant_t", "shfe_total_t"]),
 }
 EXCHANGE_DATE_COL: dict[str, str] = {ex: dcol for ex, (dcol, _) in ASOF_SPEC.items()}
+
+# A feed is "stale" once its latest report is older than this many *business*
+# days (report cadence + a day of slack). COMEX ~T+1, LME breakdown ~T+2, LME
+# OWSR ~T+3, SHFE weekly = last Friday (so up to ~a week normally).
+STALE_AFTER_BDAYS: dict[str, int] = {"cme": 3, "lme": 3, "lme_offwarrant": 5, "shfe": 8}
+_STALE_DATE_COL: dict[str, str] = {
+    "cme": "cme_data_date", "lme": "lme_warrant_data_date",
+    "lme_offwarrant": "lme_offwarrant_data_date", "shfe": "shfe_data_date",
+}
+STALE_LABEL: dict[str, str] = {
+    "cme": "COMEX stocks", "lme": "LME breakdown",
+    "lme_offwarrant": "LME off-warrant", "shfe": "SHFE weekly",
+}
+
+# --- tidy geographic breakdown (data/lme_geo.parquet) --------------------------
+LME_GEO_SCHEMA: list[str] = [
+    "run_date", "report_date", "report_type",   # 'breakdown' (per location) | 'owsr' (per region)
+    "region", "location",
+    "on_warrant_t", "cancelled_t", "opening_t",
+    "delivered_in_t", "delivered_out_t", "closing_t", "off_warrant_t",
+    "retrieved_at",
+]
+_GEO_KEY = ["report_date", "report_type", "region", "location"]
+
+
+def staleness(df: pd.DataFrame, *, ref: dt.date | None = None) -> dict[str, dict]:
+    """Per-feed freshness: {feed: {as_of, bdays_stale, stale}}.
+
+    ``bdays_stale`` counts business days between a feed's latest report date and
+    ``ref`` (default = the newest ``run_date``). ``stale`` applies the
+    :data:`STALE_AFTER_BDAYS` tolerance.
+    """
+    if df.empty:
+        return {}
+    ref_ts = pd.Timestamp(ref or pd.to_datetime(df["run_date"]).max())
+    out: dict[str, dict] = {}
+    for feed, dcol in _STALE_DATE_COL.items():
+        if dcol not in df.columns:
+            continue
+        s = pd.to_datetime(df[dcol], errors="coerce").dropna()
+        if s.empty:
+            continue
+        as_of = s.max()
+        bdays = max(0, len(pd.bdate_range(as_of, ref_ts)) - 1)
+        out[feed] = {
+            "as_of": as_of.date(),
+            "bdays_stale": bdays,
+            "stale": bdays > STALE_AFTER_BDAYS.get(feed, 3),
+        }
+    return out
 
 
 def build_daily_series(
@@ -135,7 +185,7 @@ def build_asof_series(
     for _dcol, vcols in ASOF_SPEC.values():
         for c in vcols:
             out[c] = float("nan")
-    for _ex, (sub, have) in frames.items():
+    for ex, (sub, have) in frames.items():
         # ffill from each report date (including any before cal_start), then bfill
         # so a later-starting source doesn't create a step-up "spike" when it
         # first appears; finally clip to the visible calendar.
@@ -143,18 +193,105 @@ def build_asof_series(
         filled = sub.reindex(full_idx).ffill().bfill().reindex(calendar)
         for c in have:
             out[c] = filled[c]
+        # tail-stale flag: everything on the calendar after this feed's last
+        # real report is a carry-forward.
+        out[f"{ex}_stale"] = calendar > sub.index.max()
 
+    _add_global_cols(out)
+    return out.reset_index()
+
+
+def build_native_asof_series(
+    df: pd.DataFrame, *, end: dt.date | None = None, freq: str = "B"
+) -> pd.DataFrame:
+    """Exchange-native as-of view: each feed's step-function values exist **only**
+    within [first report, last report] — no carry past the last report, no
+    back-fill before the first. ``global_*`` requires every leg present on a date
+    (``min_count`` = number of contributing feeds) so the summed line stops on
+    the earliest stale date instead of dropping/spiking. ``*_stale`` columns are
+    all ``False`` here (no carried tail) but kept for a uniform API.
+    """
+    if df.empty:
+        return df.copy()
+    end_ts = pd.Timestamp(end or dt.date.today())
+    runs = df.sort_values("run_date")
+
+    frames: dict[str, tuple[pd.DataFrame, list[str]]] = {}
+    starts: list[pd.Timestamp] = []
+    for ex, (dcol, vcols) in ASOF_SPEC.items():
+        have = [c for c in vcols if c in runs.columns]
+        if dcol not in runs.columns or not have:
+            continue
+        sub = runs[[dcol, *have]].copy()
+        sub[dcol] = pd.to_datetime(sub[dcol], errors="coerce")
+        sub = sub.dropna(subset=[dcol]).drop_duplicates(subset=[dcol], keep="last")
+        if sub.empty:
+            continue
+        frames[ex] = (sub.sort_values(dcol).set_index(dcol), have)
+        starts.append(frames[ex][0].index.min())
+
+    if not starts:
+        return pd.DataFrame(columns=["date"])
+
+    run_floor = pd.to_datetime(runs["run_date"]).min()
+    cal_start = max(min(starts), run_floor)
+    last = max([f[0].index.max() for f in frames.values()] + [end_ts])
+    calendar = pd.date_range(cal_start, last, freq=freq)
+    out = pd.DataFrame(index=calendar)
+    out.index.name = "date"
+    for _dcol, vcols in ASOF_SPEC.values():
+        for c in vcols:
+            out[c] = float("nan")
+
+    for ex, (sub, have) in frames.items():
+        first, lastr = sub.index.min(), sub.index.max()
+        window = calendar[(calendar >= first) & (calendar <= lastr)]
+        filled = sub.reindex(calendar.union(sub.index)).ffill().reindex(window)
+        for c in have:
+            out.loc[window, c] = filled[c]
+        out[f"{ex}_stale"] = False
+
+    _add_global_cols(out, require_all=True)
+    return out.reset_index()
+
+
+def _add_global_cols(out: pd.DataFrame, *, require_all: bool = False) -> None:
     def _sum(cols: list[str]) -> pd.Series:
         present = [c for c in cols if c in out.columns]
         if not present:
             return pd.Series(index=out.index, dtype="float64")
-        return out[present].sum(axis=1, min_count=1)
+        mc = len(present) if require_all else 1
+        return out[present].sum(axis=1, min_count=mc)
 
     out["global_on_warrant_t"] = _sum(["cme_on_warrant_t", "lme_on_warrant_t", "shfe_on_warrant_t"])
     out["global_cancelled_t"] = _sum(["cme_cancelled_t", "lme_cancelled_t", "shfe_cancelled_t"])
     out["global_off_warrant_t"] = _sum(["cme_off_warrant_t", "lme_off_warrant_t"])  # SHFE: none
-    # Each *_total_t is that exchange's headline figure; "reported stock" sums them.
     out["global_reported_stock_t"] = _sum(["cme_total_t", "lme_total_t", "shfe_total_t"])
-    # Grand total per spec = reported stock + LME off-warrant.
     out["global_total_t"] = _sum(["cme_total_t", "lme_total_t", "shfe_total_t", "lme_off_warrant_t"])
-    return out.reset_index()
+
+
+# --------------------------------------------------------------------------- #
+# Geographic breakdown parquet
+# --------------------------------------------------------------------------- #
+def upsert_geo(rows: list[dict], path) -> pd.DataFrame:
+    """Insert/replace tidy LME geo rows (keyed on report_date+type+region+location)
+    and write ``path`` back. ``rows`` may be empty (no-op returns existing/empty)."""
+    from pathlib import Path
+
+    path = Path(path)
+    existing = pd.read_parquet(path) if path.exists() else pd.DataFrame(columns=LME_GEO_SCHEMA)
+    if not rows:
+        return existing
+    new = pd.DataFrame([{k: r.get(k) for k in LME_GEO_SCHEMA} for r in rows], columns=LME_GEO_SCHEMA)
+    for c in ("run_date", "report_date"):
+        new[c] = pd.to_datetime(new[c], errors="coerce")
+        if c in existing.columns:
+            existing[c] = pd.to_datetime(existing[c], errors="coerce")
+    new["retrieved_at"] = pd.to_datetime(new["retrieved_at"], utc=True, errors="coerce")
+    combined = pd.concat([existing, new], ignore_index=True)
+    combined = combined.drop_duplicates(subset=_GEO_KEY, keep="last").sort_values(
+        ["report_date", "report_type", "region", "location"]
+    ).reset_index(drop=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_parquet(path, index=False)
+    return combined

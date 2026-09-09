@@ -23,12 +23,12 @@ Data Architecture and Workflow
 
 | Path | Purpose |
 |------|---------|
-| `scripts/cme_scraper.py`  | CME (COMEX) `Copper_Stocks.xls` — Registered / Eligible (short tons) |
-| `scripts/lme_scraper.py`  | LME stock-breakdown (live + cancelled warrants) + OWSR (off-warrant), via the reports JSON API behind Cloudflare (`curl_cffi`) |
+| `scripts/cme_scraper.py`  | CME (COMEX) `Copper_Stocks.xls` — Registered / Eligible (short tons); Chrome-impersonation transport (`curl_cffi`) with a plain-`requests` fallback to get past the `/delivery_reports/` datacentre-IP block |
+| `scripts/lme_scraper.py`  | LME stock-breakdown (live + cancelled warrants, plus the per-location / per-country breakdown) + OWSR (off-warrant, plus the ASIA/EUROPE/NORTH AMERICAS region totals), via the reports JSON API behind Cloudflare (`curl_cffi`) |
 | `scripts/shfe_scraper.py` | SHFE weekly stock report (库存 + 仓单) + daily warrant report (side feed) |
-| `scripts/price_scraper.py`| COMEX copper (Yahoo `HG=F`, USD/lb) vs LME cash + 3-month (Westmetall, USD/t) → CME−LME spread in USD/t |
-| `scripts/aggregate.py`    | runs all scrapers, converts CME short tons ×0.907185, harmonises, computes the global total, upserts `data/copper_inventory.parquet` |
-| `scripts/schema.py`       | shared column schema + inventory taxonomy + LOCF daily-calendar helper |
+| `scripts/price_scraper.py`| COMEX copper (Yahoo `HG=F`, USD/lb) vs LME cash + 3-month (Westmetall, USD/t) → CME−LME spread + LME cash−3M term-structure spread, all USD/t |
+| `scripts/aggregate.py`    | runs all scrapers, converts CME short tons ×0.907185, harmonises, computes the global total, upserts `data/copper_inventory.parquet` and (best-effort) `data/lme_geo.parquet` |
+| `scripts/schema.py`       | shared column schema + inventory taxonomy + LOCF daily-calendar helper; `staleness()`, the exchange-native as-of series, and the tidy geo-parquet upsert |
 | `scripts/backfill.py`     | one-off: recover ~2 weeks of history each source still exposes |
 | `app.py`                  | Streamlit dashboard |
 | `.github/workflows/daily.yml` | daily cron: run aggregator, commit the parquet back |
@@ -53,11 +53,32 @@ Individual scrapers print JSON when run directly, e.g. `python scripts/lme_scrap
 ## Automation
 
 `.github/workflows/daily.yml` runs `scripts/aggregate.py` at **10:17 UTC** daily
-(and on manual dispatch), then commits `data/copper_inventory.parquet`. Needs no
-secrets — `permissions: contents: write` + the default `GITHUB_TOKEN`. A source
-blocked by an anti-bot edge (LME Cloudflare / SHFE WAF) from the runner IP does
-**not** fail the job: the aggregator writes a partial row and forward-fills the
-other exchanges. GitHub emails you if a whole run fails.
+(and on manual dispatch), then commits `data/copper_inventory.parquet` and
+`data/lme_geo.parquet`. Needs no secrets — `permissions: contents: write` + the
+default `GITHUB_TOKEN`. A source blocked by an anti-bot edge (LME Cloudflare /
+SHFE WAF) from the runner IP does **not** fail the job: the aggregator writes a
+partial row and forward-fills the other exchanges. GitHub emails you if a whole
+run fails.
+
+### CME `/delivery_reports/` block
+
+CME's `Copper_Stocks.xls` path (unlike the settlements API the price leg uses) is
+blocked for datacentre IPs, so it fails from the Actions runner even though it
+works from a residential connection. Mitigations, in the order the code tries /
+the project would escalate:
+
+1. **`curl_cffi` Chrome impersonation** (implemented) — `cme_scraper` now makes
+   the `.xls` request with a real Chrome TLS/JA3 fingerprint before falling back
+   to plain `requests`. This is the same trick that beats LME's Cloudflare check.
+2. **A CmeWS depository-stocks JSON endpoint** — the settlements host works from
+   CI; a sibling stocks endpoint would be as reliable as the price leg.
+3. **A free Cloudflare Worker proxy** that `fetch()`es the `.xls` — Cloudflare
+   egress IPs aren't caught by the rule. Set `CME_STOCKS_URL` to the Worker.
+4. **A short second workflow on a self-hosted / residential runner** for the CME
+   leg only, committing `data/cme_latest.json` for the main run to read.
+5. **Accept + surface staleness** — CME copper stocks move slowly, so the
+   dashboard badges the feed as *N business days stale* and carries it forward;
+   `scripts/backfill.py` from a residential IP refreshes the history.
 
 ## Deploy the dashboard
 
@@ -104,16 +125,41 @@ file (e.g. the "28 Aug" file's 233,500 t shows as "01 Sep" on Westmetall).
   expose it (CME's PREV column, LME's last-7-days listing, recent SHFE Fridays)
   so the as-of chart doesn't step up when a later-lagging source first appears.
 - Missing days (holidays, blocked scrapes) are forward-filled (LOCF) for
-  charting: `scripts/schema.build_daily_series` (x-axis = pipeline run date) and
-  `build_asof_series` (x-axis = each report's own as-of date, staggered by lag —
-  the dashboard default).
+  charting. The dashboard's **View** selector picks the series builder:
+  - **Same-Day Synced (LOCF)** — `scripts/schema.build_asof_series`: every
+    exchange carried forward to a common daily calendar. Carried-forward tails
+    render dashed and a grey band + banner flag how many business days stale each
+    leg is (`staleness()` vs `STALE_AFTER_BDAYS`). Dashboard default.
+  - **Exchange-Native (as-of)** — `build_native_asof_series`: no fill past each
+    exchange's last real report; the per-exchange lines simply end, and the
+    cross-exchange `global_*` sum requires **all** legs (`min_count`) so the
+    global line stops at the earliest stale date instead of showing a false
+    step. `dod()` (day-on-day net change) is computed from this series so a stale
+    leg can never inject a spike.
+  - **Pipeline run date** — `build_daily_series`: x-axis is the pipeline run
+    date, no as-of staggering.
 
 ### Price spread
 
 `comex_copper_usd_t` = Yahoo `HG=F` previous completed close (USD/lb) × 2204.62.
 `lme_copper_cash_usd_t` / `lme_copper_3m_usd_t` from the Westmetall table.
 `cme_lme_spread_usd_t` = COMEX − LME cash (positive = COMEX rich to LME);
-`cme_lme_spread_3m_usd_t` = COMEX − LME 3-month. `comex_price_date` /
-`lme_price_date` record which session each leg is from; the spread is only filled
-when both legs are present. Either leg can fail independently without failing the
-run.
+`cme_lme_spread_3m_usd_t` = COMEX − LME 3-month;
+`lme_cash_3m_spread_usd_t` = LME cash − LME 3-month, the LME term structure
+(positive = backwardation). `comex_price_date` / `lme_price_date` record which
+session each leg is from; the spread is only filled when both legs are present.
+Either leg can fail independently without failing the run.
+
+### Geo breakdown (`data/lme_geo.parquet`)
+
+A separate tidy/long parquet, one row per (report, region, location), built
+best-effort from the **same** LME downloads (no extra fetch). `report_type` is
+`breakdown` (per-country / per-location on-warrant, cancelled, opening,
+delivered-in, delivered-out, closing tonnes from the Metals Totals report) or
+`owsr` (per-region off-warrant tonnes — ASIA / EUROPE / NORTH AMERICAS / GLOBAL).
+Schema: `run_date, report_date, report_type, region, location, on_warrant_t,
+cancelled_t, opening_t, delivered_in_t, delivered_out_t, closing_t,
+off_warrant_t, retrieved_at`; dedupe key is
+`report_date + report_type + region + location`. The dashboard's **LME by
+location** section reads it; if the file is missing the section shows a hint and
+the rest of the app is unaffected.

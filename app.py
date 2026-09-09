@@ -17,17 +17,22 @@ import datetime as dt
 import sys
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
 from scripts.schema import (  # noqa: E402
     EXCHANGE_DATE_COL,
+    STALE_LABEL,
     build_asof_series,
     build_daily_series,
+    build_native_asof_series,
+    staleness,
 )
 
 DATA_PATH = Path(__file__).parent / "data" / "copper_inventory.parquet"
+GEO_PATH = Path(__file__).parent / "data" / "lme_geo.parquet"
 
 BUCKETS = ["on_warrant", "cancelled", "off_warrant"]
 BUCKET_LABELS = {"on_warrant": "On-warrant", "cancelled": "Cancelled", "off_warrant": "Off-warrant"}
@@ -41,9 +46,9 @@ st.set_page_config(
 )
 
 
-def _parquet_token() -> float:
+def _mtime(p: Path) -> float:
     try:
-        return DATA_PATH.stat().st_mtime
+        return p.stat().st_mtime
     except OSError:
         return 0.0
 
@@ -60,13 +65,26 @@ def load_runs(token: float) -> pd.DataFrame:
     return df.sort_values("run_date").reset_index(drop=True)
 
 
+@st.cache_data(ttl=300)
+def load_geo(token: float) -> pd.DataFrame:
+    _ = token
+    if not GEO_PATH.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(GEO_PATH)
+    for c in ("run_date", "report_date"):
+        df[c] = pd.to_datetime(df[c])
+    return df
+
+
 def fmt(value: float | None, unit_div: float, suffix: str) -> str:
     if value is None or pd.isna(value):
         return "—"
     return f"{value / unit_div:,.0f} {suffix}"
 
 
-runs = load_runs(_parquet_token())
+runs = load_runs(_mtime(DATA_PATH))
+geo = load_geo(_mtime(GEO_PATH))
+fresh = staleness(runs)
 
 st.title("🟠 Global Copper Warehouse Inventory")
 
@@ -86,13 +104,17 @@ with st.sidebar:
     unit_div, unit_suffix = (1000.0, "kt") if unit == "kilotonnes" else (1.0, "t")
 
     timeline = st.radio(
-        "Timeline",
-        ["Report as-of date", "Pipeline run date"],
+        "View",
+        ["Same-Day Synced (LOCF)", "Exchange-Native (as-of)", "Pipeline run date"],
         index=0,
-        help="As-of date: plot each exchange at the date its report is *for* "
-        "(CME ~T+1, LME ~T+2, SHFE = the report Friday) — so today's run already "
-        "spans ~a week. Run date: the day the pipeline fetched it. Both forward-fill "
-        "missing days (LOCF).",
+        help=(
+            "**Same-Day Synced** — every feed carried forward (LOCF) to a common "
+            "daily calendar; carried-forward tails are shaded/dashed.\n\n"
+            "**Exchange-Native** — each feed shown only within its own reported "
+            "range; the summed global line stops where any feed goes stale "
+            "(no false spike).\n\n"
+            "**Pipeline run date** — plotted by the day the pipeline fetched it."
+        ),
     )
     show_exchanges = st.multiselect(
         "Exchanges",
@@ -101,11 +123,16 @@ with st.sidebar:
         format_func=lambda e: EXCHANGE_LABELS[e],
     )
 
-if timeline == "Report as-of date":
-    series = build_asof_series(runs).rename(columns={"date": "when"})
-if timeline != "Report as-of date" or series.empty or "when" not in series:
+_VIEW_BUILDER = {
+    "Same-Day Synced (LOCF)": build_asof_series,
+    "Exchange-Native (as-of)": build_native_asof_series,
+    "Pipeline run date": build_daily_series,
+}
+series = _VIEW_BUILDER[timeline](runs).rename(columns={"date": "when"})
+if series.empty or "when" not in series:
     series = build_daily_series(runs).rename(columns={"date": "when"})
 series = series.set_index("when")
+native_view = timeline == "Exchange-Native (as-of)"
 
 date_min, date_max = series.index.min().date(), series.index.max().date()
 with st.sidebar:
@@ -120,14 +147,15 @@ with st.sidebar:
 latest = runs.iloc[-1]
 prev = runs.iloc[-2] if len(runs) > 1 else None
 
-# One forward-filled business-day frame covering inventory (as-of) + prices
-# (run-date), used for every day-over-day calculation.
-_dod_series = build_asof_series(runs).set_index("date")
+# Day-over-day is computed on the EXCHANGE-NATIVE series (real report points
+# only), so a carried-forward / stale leg can never inject a spike. Prices are
+# joined from the run-date daily series.
+_dod_series = build_native_asof_series(runs).set_index("date")
 _price_cols = [c for c in runs.columns if c.endswith(("_usd_t", "_usd_lb"))]
 if _price_cols:
     _dod_series = _dod_series.join(
         build_daily_series(runs).set_index("date")[_price_cols], how="outer"
-    ).ffill()
+    )
 
 
 def _asof(e: str):
@@ -137,8 +165,8 @@ def _asof(e: str):
 
 def dod(col: str) -> tuple[float | None, float | None]:
     """Change of `col` = latest value minus the previous *different* value on the
-    forward-filled daily series (i.e. the last actual move, not "today vs an
-    identical yesterday")."""
+    exchange-native series (the last real report-to-report move; a
+    carried-forward / stale leg contributes 0, never a spike)."""
     if col not in _dod_series.columns:
         return None, None
     vals = _dod_series[col].dropna()
@@ -168,6 +196,25 @@ as_of = " · ".join(f"{EXCHANGE_LABELS[e]}: {_asof(e) or 'n/a'}" for e in EXCHAN
 st.caption(f"Last pipeline run **{latest['run_date'].date()}** — data as of: {as_of}")
 
 # --------------------------------------------------------------------------- #
+# Stale-feed banner
+# --------------------------------------------------------------------------- #
+_stale_since: dict[str, dt.date] = {}
+_stale_msgs: list[str] = []
+for feed, info in fresh.items():
+    if info["stale"]:
+        _stale_msgs.append(
+            f"**{STALE_LABEL.get(feed, feed)}** carried forward — "
+            f"{info['bdays_stale']} business days stale (as of {info['as_of']})"
+        )
+        _stale_since[feed] = info["as_of"]
+if _stale_msgs:
+    st.warning("⚠️ " + "  ·  ".join(_stale_msgs))
+# earliest date any leg went stale — used to shade chart tails
+_earliest_stale = min(
+    (pd.Timestamp(d) for d in _stale_since.values()), default=None
+)
+
+# --------------------------------------------------------------------------- #
 # KPI row
 # --------------------------------------------------------------------------- #
 k = st.columns(4)
@@ -182,38 +229,95 @@ for col, b in zip(k[1:], BUCKETS):
 st.divider()
 
 # --------------------------------------------------------------------------- #
-# Charts — one stacked bar per date the picture actually changed (a source
-# published), not one per forward-filled day. String-dated x-axis = no time,
-# equal-width bars, no weekend gaps (series is already business-day).
+# Charts — hand-built Altair so no invalid "bind:scales" param is emitted on a
+# categorical axis (the cause of the previously-blank chart), and so stale tails
+# can be shaded / dashed.
 # --------------------------------------------------------------------------- #
-def change_point_bars(cols_df: pd.DataFrame) -> pd.DataFrame:
-    changed = cols_df.fillna(-1.0).ne(cols_df.fillna(-1.0).shift()).any(axis=1)
-    out = cols_df.loc[changed].copy()
-    out.index = out.index.strftime("%Y-%m-%d")
-    return out
+_TINT_HEX = {"On-warrant": "#5b8def", "Cancelled": "#e0a458",
+             "Off-warrant": "#5aa469", "Reported stock": "#8a7fc0"}
+_EXCH_HEX = {"CME (COMEX)": "#d1495b", "LME": "#2e86ab", "SHFE": "#e5a823"}
 
 
-x_label = "report as-of date" if timeline == "Report as-of date" else "pipeline run date"
-left, right = st.columns(2)
+def _change_points(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only rows where a value actually changed (a source published),
+    keeping the datetime index."""
+    changed = df.fillna(-1.0).ne(df.fillna(-1.0).shift()).any(axis=1)
+    return df.loc[changed]
 
-with left:
-    st.subheader("Global composition by date")
-    comp = series[[f"global_{b}_t" for b in BUCKETS]] / unit_div
-    comp.columns = [BUCKET_LABELS[b] for b in BUCKETS]
-    st.bar_chart(
-        change_point_bars(comp), height=340, stack=True,
-        y_label=unit_suffix, x_label=x_label,
+
+def _stale_band() -> alt.Chart | None:
+    if _earliest_stale is None or timeline == "Pipeline run date":
+        return None
+    span = pd.DataFrame({"start": [_earliest_stale], "end": [series.index.max()]})
+    return alt.Chart(span).mark_rect(color="#9aa0a6", opacity=0.10).encode(
+        x="start:T", x2="end:T"
     )
 
+
+def composition_chart(s: pd.DataFrame) -> alt.LayerChart:
+    cols = [f"global_{b}_t" for b in BUCKETS]
+    long = (
+        (s[cols] / unit_div)
+        .rename(columns={f"global_{b}_t": BUCKET_LABELS[b] for b in BUCKETS})
+        .reset_index().rename(columns={"when": "date"})
+        .melt("date", var_name="bucket", value_name="value")
+        .dropna(subset=["value"])
+    )
+    area = alt.Chart(long).mark_area(interpolate="step-after", opacity=0.85).encode(
+        x=alt.X("date:T", title=None, axis=alt.Axis(format="%b %d", labelAngle=-40)),
+        y=alt.Y("value:Q", title=unit_suffix, stack="zero"),
+        color=alt.Color("bucket:N", title=None,
+                        scale=alt.Scale(domain=list(_TINT_HEX), range=list(_TINT_HEX.values())),
+                        legend=alt.Legend(orient="bottom")),
+        tooltip=["date:T", "bucket:N", alt.Tooltip("value:Q", format=",.0f")],
+    )
+    layers = [c for c in (_stale_band(), area) if c is not None]
+    return alt.layer(*layers).properties(height=340)
+
+
+def by_exchange_chart(s: pd.DataFrame) -> alt.LayerChart:
+    exs = show_exchanges or EXCHANGES
+    frames = []
+    for e in exs:
+        col = f"{e}_total_t"
+        if col not in s.columns:
+            continue
+        f = (s[[col]] / unit_div).reset_index().rename(columns={"when": "date", col: "value"})
+        f["exchange"] = EXCHANGE_LABELS[e]
+        f["stale"] = s[f"{e}_stale"].values if f"{e}_stale" in s.columns else False
+        frames.append(f)
+    long = pd.concat(frames, ignore_index=True).dropna(subset=["value"]) if frames else pd.DataFrame()
+    base = alt.Chart(long).encode(
+        x=alt.X("date:T", title=None, axis=alt.Axis(format="%b %d", labelAngle=-40)),
+        y=alt.Y("value:Q", title=unit_suffix),
+        color=alt.Color("exchange:N", title=None,
+                        scale=alt.Scale(domain=list(_EXCH_HEX), range=list(_EXCH_HEX.values())),
+                        legend=alt.Legend(orient="bottom")),
+    )
+    line = base.mark_line(interpolate="step-after").encode(
+        strokeDash=alt.StrokeDash("stale:N", legend=None,
+                                  scale=alt.Scale(domain=[False, True], range=[[1, 0], [4, 3]])),
+    )
+    pts = base.mark_point(filled=True, size=28).encode(
+        tooltip=["date:T", "exchange:N", alt.Tooltip("value:Q", format=",.0f")],
+    )
+    layers = [c for c in (_stale_band(), line, pts) if c is not None]
+    return alt.layer(*layers).properties(height=340)
+
+
+left, right = st.columns(2)
+with left:
+    st.subheader("Global composition")
+    st.altair_chart(composition_chart(_change_points(series)), width="stretch")
 with right:
     st.subheader("Total by exchange")
-    cols = [f"{e}_total_t" for e in show_exchanges] or [f"{e}_total_t" for e in EXCHANGES]
-    byx = series[cols] / unit_div
-    byx.columns = [EXCHANGE_LABELS[c.split("_")[0]] for c in cols]
-    st.bar_chart(
-        change_point_bars(byx), height=340, stack=True,
-        y_label=unit_suffix, x_label=x_label,
-    )
+    st.altair_chart(by_exchange_chart(_change_points(series)), width="stretch")
+if native_view:
+    st.caption("Exchange-Native view: each line ends at that feed's last report; "
+               "the summed composition stops where any feed goes stale.")
+elif _earliest_stale is not None:
+    st.caption("Same-Day Synced view: shaded region and dashed segments are "
+               "carried-forward (stale) values.")
 
 st.subheader("Breakdown & day-over-day change")
 
@@ -302,43 +406,119 @@ st.divider()
 # --------------------------------------------------------------------------- #
 # CME (COMEX) - LME copper price spread  (market-on-close, previous trading day)
 # --------------------------------------------------------------------------- #
-st.subheader("CME (COMEX) − LME copper price spread")
+st.subheader("Copper price spreads")
 
 if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
     contract = latest.get("comex_contract") or "front"
-    p = st.columns(3)
+    p = st.columns(4)
     p[0].metric("CME − LME (3-month)", f"{latest['cme_lme_spread_3m_usd_t']:+,.0f} USD/t",
                 usd_delta("cme_lme_spread_3m_usd_t"))
-    p[1].metric(f"CME price ({contract})",
+    p[1].metric("LME cash − 3-month",
+                f"{latest.get('lme_cash_3m_spread_usd_t'):+,.0f} USD/t"
+                if pd.notna(latest.get("lme_cash_3m_spread_usd_t")) else "—",
+                usd_delta("lme_cash_3m_spread_usd_t"))
+    p[2].metric(f"CME price ({contract})",
                 f"{latest['comex_copper_usd_t']:,.0f} USD/t", usd_delta("comex_copper_usd_t"))
-    p[2].metric("LME price (3-month)",
+    p[3].metric("LME price (3-month)",
                 f"{latest['lme_copper_3m_usd_t']:,.0f} USD/t", usd_delta("lme_copper_3m_usd_t"))
 
     cpx_d, lme_d = latest.get("comex_price_date"), latest.get("lme_price_date")
     st.caption(
-        f"Market-on-close (previous trading day). CME official settlement for the "
-        f"most-active COMEX copper month ({contract}) "
-        f"{latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.62 lb/t, minus LME "
-        f"3-month. As of {pd.to_datetime(cpx_d).date() if pd.notna(cpx_d) else 'n/a'} "
+        f"Market-on-close (previous trading day). **CME − LME 3M**: CME official "
+        f"settlement for the most-active COMEX month ({contract}, "
+        f"{latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.6226 lb/t) minus "
+        f"LME 3-month. **LME cash − 3M**: LME term structure (positive = "
+        f"backwardation). As of {pd.to_datetime(cpx_d).date() if pd.notna(cpx_d) else 'n/a'} "
         f"(COMEX) / {pd.to_datetime(lme_d).date() if pd.notna(lme_d) else 'n/a'} (LME). "
-        "Positive = COMEX above LME. Sources: CME Group, Westmetall."
+        "Sources: CME Group, lme.com, Westmetall."
     )
 
-    # Continuous line — one point per pipeline run that recorded a spread; the
-    # line extends each day as new settlements land.
+    _spread_cols = {
+        "cme_lme_spread_3m_usd_t": "CME − LME 3M",
+        "lme_cash_3m_spread_usd_t": "LME cash − 3M",
+    }
     _sp = (
-        runs.dropna(subset=["cme_lme_spread_3m_usd_t"])
-        .assign(when=lambda d: pd.to_datetime(d["run_date"]))
-        .set_index("when")[["cme_lme_spread_3m_usd_t"]]
-        .sort_index()
-        .rename(columns={"cme_lme_spread_3m_usd_t": "CME − LME 3-month (USD/t)"})
+        runs[["run_date", *[c for c in _spread_cols if c in runs.columns]]]
+        .rename(columns=_spread_cols)
+        .melt("run_date", var_name="spread", value_name="usd_t")
+        .dropna(subset=["usd_t"])
     )
-    _sp.index = _sp.index.strftime("%Y-%m-%d")
-    st.line_chart(_sp, height=300, y_label="USD/t", x_label="date")
-    if len(_sp) < 2:
-        st.caption(f"{len(_sp)} data point so far — the line fills in as the daily pipeline runs.")
+    if not _sp.empty:
+        _sp["run_date"] = pd.to_datetime(_sp["run_date"])
+        line = alt.Chart(_sp).mark_line(point=True).encode(
+            x=alt.X("run_date:T", title=None, axis=alt.Axis(format="%b %d", labelAngle=-40)),
+            y=alt.Y("usd_t:Q", title="USD/t"),
+            color=alt.Color("spread:N", title=None, legend=alt.Legend(orient="bottom")),
+            tooltip=["run_date:T", "spread:N", alt.Tooltip("usd_t:Q", format="+,.0f")],
+        )
+        zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#9aa0a6").encode(y="y:Q")
+        st.altair_chart((zero + line).properties(height=300), width="stretch")
+        if _sp["run_date"].nunique() < 2:
+            st.caption("1 data point so far — the lines fill in as the daily pipeline runs.")
 else:
-    st.info("No CME–LME price data yet — populates from the next pipeline run.")
+    st.info("No price data yet — populates from the next pipeline run.")
+
+# --------------------------------------------------------------------------- #
+# LME by location (data/lme_geo.parquet)
+# --------------------------------------------------------------------------- #
+st.divider()
+st.subheader("LME by location")
+
+if geo.empty:
+    st.info("Geo breakdown builds from the next pipeline run "
+            "(`data/lme_geo.parquet`).")
+else:
+    bd = geo[geo["report_type"] == "breakdown"]
+    if not bd.empty:
+        rd = bd["report_date"].max()
+        latest_bd = bd[bd["report_date"] == rd].copy()
+        st.caption(f"LME stock-breakdown — report of **{rd.date()}** "
+                   f"({len(latest_bd)} delivery points)")
+        gcols = ["location", "region", "on_warrant_t", "cancelled_t",
+                 "delivered_in_t", "delivered_out_t", "closing_t"]
+        disp = latest_bd[gcols].rename(columns={
+            "location": "Location", "region": "Country",
+            "on_warrant_t": f"On-warrant ({unit_suffix})",
+            "cancelled_t": f"Cancelled ({unit_suffix})",
+            "delivered_in_t": f"Delivered-in ({unit_suffix})",
+            "delivered_out_t": f"Delivered-out ({unit_suffix})",
+            "closing_t": f"Closing ({unit_suffix})",
+        })
+        num = [c for c in disp.columns if c.endswith(f"({unit_suffix})")]
+        disp[num] = disp[num] / unit_div
+        disp = disp.sort_values(f"Closing ({unit_suffix})", ascending=False)
+        gl, gr = st.columns([3, 2])
+        gl.dataframe(disp.style.format({c: "{:,.0f}" for c in num}, na_rep="—"),
+                     width="stretch", hide_index=True)
+        top = latest_bd.nlargest(15, "on_warrant_t")[["location", "region", "on_warrant_t"]].copy()
+        top["on_warrant"] = top["on_warrant_t"] / unit_div
+        gr.altair_chart(
+            alt.Chart(top).mark_bar(color="#2e86ab").encode(
+                x=alt.X("on_warrant:Q", title=f"On-warrant ({unit_suffix})"),
+                y=alt.Y("location:N", sort="-x", title=None),
+                tooltip=["location:N", "region:N", alt.Tooltip("on_warrant:Q", format=",.0f")],
+            ).properties(height=360),
+            width="stretch",
+        )
+
+    ow = geo[geo["report_type"] == "owsr"]
+    if not ow.empty:
+        ord_ = ow["report_date"].max()
+        latest_ow = ow[ow["report_date"] == ord_]
+        regs = latest_ow[latest_ow["region"] != "GLOBAL"]
+        glob = latest_ow[latest_ow["region"] == "GLOBAL"]["off_warrant_t"]
+        st.caption(f"LME off-warrant (OWSR) by region — **{ord_.date()}** · "
+                   f"global {fmt(float(glob.iloc[0]) if not glob.empty else None, unit_div, unit_suffix)}")
+        regs = regs[["region", "off_warrant_t"]].copy()
+        regs["off_warrant"] = regs["off_warrant_t"] / unit_div
+        st.altair_chart(
+            alt.Chart(regs).mark_bar(color="#5aa469").encode(
+                x=alt.X("region:N", sort="-y", title=None),
+                y=alt.Y("off_warrant:Q", title=f"Off-warrant ({unit_suffix})"),
+                tooltip=["region:N", alt.Tooltip("off_warrant:Q", format=",.0f")],
+            ).properties(height=220),
+            width="stretch",
+        )
 
 # --------------------------------------------------------------------------- #
 # Data health / raw log

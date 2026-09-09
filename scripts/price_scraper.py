@@ -340,7 +340,8 @@ def get_cme_lme_copper_spread() -> dict[str, Any]:
         "retrieved_at": retrieved_at,
         "comex_copper_usd_lb": None, "comex_copper_usd_t": None,
         "comex_price_date": None, "comex_contract": None,
-        "lme_copper_cash_usd_t": None, "lme_copper_3m_usd_t": None, "lme_price_date": None,
+        "lme_copper_cash_usd_t": None, "lme_copper_3m_usd_t": None,
+        "lme_cash_3m_spread_usd_t": None, "lme_price_date": None,
         "cme_lme_spread_usd_t": None, "cme_lme_spread_3m_usd_t": None,
         "price_legs_ok": [], "price_legs_failed": [],
     }
@@ -368,6 +369,12 @@ def get_cme_lme_copper_spread() -> dict[str, Any]:
     except PriceScraperError as exc:
         rec["price_legs_failed"].append("LME")
         log.warning("LME price leg failed: %s", exc)
+
+    if rec["lme_copper_cash_usd_t"] is not None and rec["lme_copper_3m_usd_t"] is not None:
+        # LME term structure: cash - 3-month (positive = backwardation).
+        rec["lme_cash_3m_spread_usd_t"] = round(
+            rec["lme_copper_cash_usd_t"] - rec["lme_copper_3m_usd_t"], 2
+        )
 
     cx_t = rec["comex_copper_usd_t"]
     if cx_t is not None and rec["lme_copper_3m_usd_t"] is not None:

@@ -63,7 +63,9 @@ from scripts.lme_scraper import (  # noqa: E402
     get_lme_copper_warrants,
 )
 from scripts.price_scraper import PriceScraperError, get_cme_lme_copper_spread  # noqa: E402
-from scripts.schema import DATE_COLS, SCHEMA, build_daily_series  # noqa: E402,F401
+from scripts.schema import (  # noqa: E402,F401
+    DATE_COLS, LME_GEO_SCHEMA, SCHEMA, build_daily_series, upsert_geo,
+)
 from scripts.shfe_scraper import SHFEScraperError, get_shfe_copper_stocks  # noqa: E402
 
 log = logging.getLogger("aggregate")
@@ -72,6 +74,10 @@ log = logging.getLogger("aggregate")
 SHORT_TON_TO_TONNE = 0.907185
 
 DEFAULT_PARQUET = _HERE.parent / "data" / "copper_inventory.parquet"
+DEFAULT_GEO_PARQUET = _HERE.parent / "data" / "lme_geo.parquet"
+
+# Best-effort geo breakdown captured alongside the LME scrapes (no extra fetch).
+_geo: dict[str, Any] = {"locations": [], "regions": [], "warrant_date": None, "owsr_date": None}
 
 _DATE_COLS = DATE_COLS  # local alias; SCHEMA + build_daily_series come from scripts.schema
 
@@ -99,7 +105,9 @@ def _run_cme() -> dict[str, Any]:
 
 
 def _run_lme_warrants() -> dict[str, Any]:
-    rec = get_lme_copper_warrants()
+    rec = get_lme_copper_warrants(with_locations=True)
+    _geo["locations"] = rec.get("locations") or []
+    _geo["warrant_date"] = rec["report_date"]
     return {
         "lme_on_warrant_t": rec["live_warrant_tonnes"],
         "lme_cancelled_t": rec["cancelled_warrant_tonnes"],
@@ -109,7 +117,9 @@ def _run_lme_warrants() -> dict[str, Any]:
 
 
 def _run_lme_offwarrant() -> dict[str, Any]:
-    rec = get_lme_copper_offwarrant()
+    rec = get_lme_copper_offwarrant(with_regions=True)
+    _geo["regions"] = rec.get("regions") or []
+    _geo["owsr_date"] = rec["report_date"]
     return {
         "lme_off_warrant_t": rec["off_warrant_tonnes"],
         "lme_offwarrant_data_date": rec["report_date"],
@@ -131,7 +141,7 @@ def _run_shfe(enrich_with_daily: bool) -> dict[str, Any]:
 
 _PRICE_COLS = [
     "comex_copper_usd_lb", "comex_copper_usd_t", "comex_price_date", "comex_contract",
-    "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_price_date",
+    "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_cash_3m_spread_usd_t", "lme_price_date",
     "cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t",
 ]
 
@@ -160,6 +170,7 @@ def collect(
     On a scraper failure: re-raise if ``strict`` else carry the previous row's
     values for that exchange forward (marking ``*_stale``).
     """
+    _geo.update(locations=[], regions=[], warrant_date=None, owsr_date=None)
     row: dict[str, Any] = {k: None for k in SCHEMA}
     row["run_date"] = dt.date.today()
     row["retrieved_at"] = dt.datetime.now(dt.timezone.utc)
@@ -352,9 +363,34 @@ def _fmt_summary(row: dict[str, Any]) -> str:
     ])
 
 
+def _geo_rows(run_date: Any, retrieved_at: Any) -> list[dict[str, Any]]:
+    """Tidy rows for data/lme_geo.parquet from whatever the LME scrapes captured."""
+    rows: list[dict[str, Any]] = []
+    for loc in _geo["locations"]:
+        rows.append({
+            "run_date": run_date, "report_date": loc.get("report_date") or _geo["warrant_date"],
+            "report_type": "breakdown", "region": loc.get("country"), "location": loc.get("location"),
+            "on_warrant_t": loc.get("on_warrant_t"), "cancelled_t": loc.get("cancelled_t"),
+            "opening_t": loc.get("opening_t"), "delivered_in_t": loc.get("delivered_in_t"),
+            "delivered_out_t": loc.get("delivered_out_t"), "closing_t": loc.get("closing_t"),
+            "off_warrant_t": None, "retrieved_at": retrieved_at,
+        })
+    for reg in _geo["regions"]:
+        rows.append({
+            "run_date": run_date, "report_date": reg.get("report_date") or _geo["owsr_date"],
+            "report_type": "owsr", "region": reg.get("region"), "location": None,
+            "on_warrant_t": None, "cancelled_t": None, "opening_t": None,
+            "delivered_in_t": None, "delivered_out_t": None, "closing_t": None,
+            "off_warrant_t": reg.get("off_warrant_t"), "retrieved_at": retrieved_at,
+        })
+    return rows
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Aggregate global copper warehouse inventory.")
     p.add_argument("--parquet", type=Path, default=DEFAULT_PARQUET, help="output parquet path")
+    p.add_argument("--geo-parquet", type=Path, default=DEFAULT_GEO_PARQUET,
+                   help="output path for the tidy LME geo breakdown")
     p.add_argument("--dry-run", action="store_true", help="compute and print, do not write")
     p.add_argument("--strict", action="store_true", help="abort if any scraper fails")
     p.add_argument("--no-shfe-daily", action="store_true", help="skip the SHFE daily-warrant side fetch")
@@ -383,6 +419,16 @@ def main(argv: list[str] | None = None) -> int:
 
     upsert_parquet(row, args.parquet)
     print(f"\nupserted run_date={row['run_date']} -> {args.parquet}")
+
+    try:
+        geo_rows = _geo_rows(row["run_date"], row["retrieved_at"])
+        if geo_rows:
+            geo = upsert_geo(geo_rows, args.geo_parquet)
+            n_loc = sum(r["report_type"] == "breakdown" for r in geo_rows)
+            print(f"geo: +{n_loc} locations, +{len(geo_rows) - n_loc} OWSR regions "
+                  f"-> {args.geo_parquet} ({len(geo)} rows)")
+    except Exception as exc:  # noqa: BLE001 - geo is best-effort, never fail the run
+        log.warning("geo breakdown upsert failed (non-fatal): %s", exc)
     return 0
 
 

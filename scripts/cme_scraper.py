@@ -76,6 +76,11 @@ try:
 except ImportError:  # pragma: no cover - requests is in requirements.txt
     requests = None  # type: ignore[assignment]
 
+try:  # Chrome TLS/JA3 impersonation — the /delivery_reports/ path fingerprint-blocks
+    from curl_cffi import requests as cffi_requests
+except ImportError:  # pragma: no cover - curl_cffi is in requirements.txt
+    cffi_requests = None  # type: ignore[assignment]
+
 __all__ = [
     "get_cme_copper_stocks",
     "download_cme_copper_stocks",
@@ -194,57 +199,86 @@ def download_cme_copper_stocks(
 ) -> bytes:
     """Fetch the raw Copper_Stocks workbook as bytes.
 
-    Retries transient network errors and 429/5xx responses with a linear
-    backoff. Raises :class:`CMEBlockedError` on the anti-scraping 403 and
-    :class:`CMEScraperError` on any other non-200.
+    The ``/delivery_reports/`` path anti-scraping rule 403s plain ``requests``
+    from datacentre / CI IPs, so we try **curl_cffi with Chrome impersonation**
+    first (it beats the same fingerprint check on lme.com) and fall back to
+    ``requests`` only if curl_cffi is unavailable or itself blocked. Retries
+    transient network errors and 429/5xx with a linear backoff. Raises
+    :class:`CMEBlockedError` on the anti-scraping 403 (after both transports),
+    :class:`CMEScraperError` on any other failure.
     """
-    if requests is None:  # pragma: no cover
-        raise CMEScraperError("the 'requests' package is required for downloading")
+    if requests is None and cffi_requests is None:  # pragma: no cover
+        raise CMEScraperError("curl_cffi or requests is required for downloading")
 
-    own_session = session is None
-    sess = session or requests.Session()
-    if own_session:
-        sess.headers.update(_BROWSER_HEADERS)
+    def _handle(resp, transport: str) -> bytes | None:
+        content = getattr(resp, "content", b"") or b""
+        _raise_for_block(resp.status_code, content)
+        if resp.status_code == 200 and content:
+            _sanity_check_payload(content)
+            if save_raw_to is not None:
+                dest = Path(save_raw_to)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(content)
+                log.info("CME: wrote raw payload to %s (%d bytes)", dest, len(content))
+            return content
+        if resp.status_code in (429, 500, 502, 503, 504):
+            return None  # retryable
+        raise CMEScraperError(
+            f"CME returned HTTP {resp.status_code} for {url} via {transport} "
+            f"({len(content)} bytes)"
+        )
 
     last_exc: Exception | None = None
-    try:
+
+    # --- primary: curl_cffi (Chrome impersonation) ---
+    if cffi_requests is not None:
         for attempt in range(1, retries + 1):
             try:
-                log.info("CME: GET %s (attempt %d/%d)", url, attempt, retries)
-                resp = sess.get(url, timeout=timeout, headers=_BROWSER_HEADERS)
-            except requests.RequestException as exc:  # DNS, connReset, timeout, ...
+                log.info("CME: GET %s via curl_cffi (attempt %d/%d)", url, attempt, retries)
+                resp = cffi_requests.get(
+                    url, impersonate="chrome", timeout=timeout, headers=_BROWSER_HEADERS
+                )
+                got = _handle(resp, "curl_cffi")
+                if got is not None:
+                    return got
+                last_exc = CMEScraperError(f"CME HTTP {resp.status_code} via curl_cffi")
+            except CMEBlockedError as exc:
                 last_exc = exc
-                log.warning("CME: network error on attempt %d: %s", attempt, exc)
-                _sleep_before_retry(attempt, retries, backoff)
-                continue
+                log.warning("CME: curl_cffi blocked on attempt %d", attempt)
+                break  # blocked -> curl_cffi won't recover; try requests fallback
+            except Exception as exc:  # noqa: BLE001 - curl_cffi raises its own types
+                last_exc = exc
+                log.warning("CME: curl_cffi error on attempt %d: %s", attempt, exc)
+            _sleep_before_retry(attempt, retries, backoff)
 
-            content = resp.content or b""
-            _raise_for_block(resp.status_code, content)
-
-            if resp.status_code == 200 and content:
-                _sanity_check_payload(content)
-                if save_raw_to is not None:
-                    dest = Path(save_raw_to)
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(content)
-                    log.info("CME: wrote raw payload to %s (%d bytes)", dest, len(content))
-                return content
-
-            if resp.status_code in (429, 500, 502, 503, 504):
-                last_exc = CMEScraperError(f"CME returned HTTP {resp.status_code}")
-                log.warning("CME: retryable HTTP %s on attempt %d", resp.status_code, attempt)
-                _sleep_before_retry(attempt, retries, backoff)
-                continue
-
-            raise CMEScraperError(
-                f"CME returned HTTP {resp.status_code} for {url} "
-                f"({len(content)} bytes, content-type={resp.headers.get('Content-Type')!r})"
-            )
-
-        raise CMEScraperError(f"CME download failed after {retries} attempts") from last_exc
-    finally:
+    # --- fallback: plain requests ---
+    if requests is not None:
+        own_session = session is None
+        sess = session or requests.Session()
         if own_session:
-            sess.close()
+            sess.headers.update(_BROWSER_HEADERS)
+        try:
+            for attempt in range(1, retries + 1):
+                try:
+                    log.info("CME: GET %s via requests (attempt %d/%d)", url, attempt, retries)
+                    resp = sess.get(url, timeout=timeout, headers=_BROWSER_HEADERS)
+                except requests.RequestException as exc:
+                    last_exc = exc
+                    log.warning("CME: requests network error on attempt %d: %s", attempt, exc)
+                    _sleep_before_retry(attempt, retries, backoff)
+                    continue
+                got = _handle(resp, "requests")
+                if got is not None:
+                    return got
+                last_exc = CMEScraperError(f"CME HTTP {resp.status_code} via requests")
+                _sleep_before_retry(attempt, retries, backoff)
+        finally:
+            if own_session:
+                sess.close()
+
+    if isinstance(last_exc, CMEBlockedError):
+        raise last_exc
+    raise CMEScraperError(f"CME download failed after all attempts: {last_exc}") from last_exc
 
 
 def _sleep_before_retry(attempt: int, retries: int, backoff: float) -> None:

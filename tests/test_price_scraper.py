@@ -36,6 +36,9 @@ def test_parse_westmetall() -> None:
     assert rows[0] == (dt.date(2026, 9, 1), 14_395.50, 14_215.00)  # newest first
     assert rows[-1][0] == dt.date(2026, 8, 27)
     assert len(rows) == 3
+    # cash − 3-month term-structure spread (positive = backwardation)
+    _, cash, m3 = rows[0]
+    assert round(cash - m3, 2) == 180.50
     print("test_parse_westmetall: OK", rows[0])
 
 

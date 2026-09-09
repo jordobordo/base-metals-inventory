@@ -54,12 +54,12 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- data/copper_inventory.parquet; then
-            echo "No change to data/copper_inventory.parquet — nothing to commit."
+          if git diff --quiet -- data/copper_inventory.parquet data/lme_geo.parquet; then
+            echo "No change to the inventory parquets — nothing to commit."
             exit 0
           fi
 
-          git add data/copper_inventory.parquet
+          git add data/copper_inventory.parquet data/lme_geo.parquet
           git commit -m "data: copper inventory $(date -u +%Y-%m-%d)"
 
           for attempt in 1 2 3; do

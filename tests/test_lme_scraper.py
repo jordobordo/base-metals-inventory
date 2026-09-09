@@ -23,7 +23,9 @@ from scripts.lme_scraper import (  # noqa: E402
     _date_from_name,
     _to_number,
     parse_lme_offwarrant,
+    parse_lme_offwarrant_regions,
     parse_lme_stock_breakdown,
+    parse_lme_stock_breakdown_locations,
 )
 
 FIX = ROOT / "tests" / "fixtures"
@@ -72,6 +74,32 @@ def test_parse_offwarrant() -> None:
     print("test_parse_offwarrant: OK", rec)
 
 
+def test_parse_locations() -> None:
+    locs = parse_lme_stock_breakdown_locations(
+        (FIX / "lme_stock_breakdown_sample.xls").read_bytes(),
+        report_date=dt.date(2026, 8, 26),
+    )
+    assert len(locs) == 25
+    # per-location on-warrant / cancelled reconcile to the Total row
+    assert sum(r["on_warrant_t"] for r in locs) == 107_050.0
+    assert sum(r["cancelled_t"] for r in locs) == 128_525.0
+    assert sum(r["closing_t"] for r in locs) == 235_575.0
+    r0 = next(r for r in locs if r["location"] == "Hamburg")
+    assert r0["country"] == "Germany"
+    assert r0["report_date"] == dt.date(2026, 8, 26)
+    print("test_parse_locations: OK", len(locs), "locations")
+
+
+def test_parse_offwarrant_regions() -> None:
+    regs = parse_lme_offwarrant_regions(
+        (FIX / "lme_owsr_sample.xlsx").read_bytes(), report_date=dt.date(2026, 8, 26)
+    )
+    by = {r["region"]: r["off_warrant_t"] for r in regs}
+    assert set(by) == {"ASIA", "EUROPE", "NORTH AMERICAS", "GLOBAL"}
+    assert by["ASIA"] + by["EUROPE"] + by["NORTH AMERICAS"] == by["GLOBAL"] == 117_155.0
+    print("test_parse_offwarrant_regions: OK", by)
+
+
 def test_date_from_name() -> None:
     assert _date_from_name("Metals Reports 26 Aug 2026") == dt.date(2026, 8, 26)
     assert _date_from_name("Metals Reports_20260826.xls") == dt.date(2026, 8, 26)
@@ -95,4 +123,6 @@ if __name__ == "__main__":
     test_parse_2026_sample()
     test_parse_2017_format()
     test_parse_offwarrant()
+    test_parse_locations()
+    test_parse_offwarrant_regions()
     print("\nAll offline LME tests passed.")
