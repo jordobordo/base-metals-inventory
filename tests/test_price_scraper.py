@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import inspect
+import os
 import sys
 from pathlib import Path
 
@@ -122,6 +123,65 @@ def test_spread_aligns_lme_to_comex_session(monkeypatch) -> None:
     print("test_spread_aligns_lme_to_comex_session: OK")
 
 
+def test_barchart_history_parsing(monkeypatch) -> None:
+    """Barchart active-contract + history flow, with the HTTP calls stubbed."""
+    import scripts.price_scraper as ps
+
+    monkeypatch.setattr(ps, "_barchart_session", lambda url: (object(), "tok"))
+
+    def fake_get(session, token, url, params, referer):
+        if "quotes/get" in url:
+            return [{"symbol": "HGU26", "openInterest": 2000, "volume": 600},
+                    {"symbol": "HGZ26", "openInterest": 168787, "volume": 5000}]
+        return [
+            {"date": "2026-09-04", "settle": 6.6825, "volume": 100, "open_interest": 166562},
+            {"date": "2026-09-03", "settle": 6.6645, "volume": 90, "open_interest": 166031},
+            {"date": "2026-09-02", "settle": 6.5930, "volume": 80, "open_interest": 163579},
+        ]
+
+    monkeypatch.setattr(ps, "_barchart_get", fake_get)
+    df = ps.get_comex_copper_history(days=30)
+    assert list(df["date"].dt.strftime("%Y-%m-%d")) == ["2026-09-02", "2026-09-03", "2026-09-04"]
+    assert (df["contract"] == "HGZ26").all()  # highest OI, not the front month
+    assert abs(df.iloc[-1]["settle_usd_t"] - 6.6825 * LB_PER_TONNE) < 0.5
+
+    cx = ps._comex_from_barchart(dt.date(2026, 9, 4))
+    assert cx.price_date == dt.date(2026, 9, 3) and cx.source == "Barchart"
+    assert cx.contract == "HGZ26"
+    print("test_barchart_history_parsing: OK")
+
+
+def test_barchart_challenge_raises(monkeypatch) -> None:
+    """A JS-challenge warmup (202, no XSRF cookie) surfaces a clear error so the
+    CmeWS/Yahoo fallbacks take over."""
+    import scripts.price_scraper as ps
+
+    class _Cookies:
+        def get(self, _k):
+            return None
+
+    class _Resp:
+        status_code = 202
+        text = "<html><body>Please enable JavaScript to continue</body></html>"
+        cookies = _Cookies()
+
+    class _Sess:
+        cookies = _Cookies()
+
+        def get(self, *_a, **_k):
+            return _Resp()
+
+    monkeypatch.setattr(ps.cffi_requests, "Session", lambda **_k: _Sess())
+    monkeypatch.delenv("BARCHART_XSRF_TOKEN", raising=False)
+    monkeypatch.delenv("BARCHART_COOKIE", raising=False)
+    try:
+        ps._barchart_session(ps.BARCHART_QUOTES_PAGE)
+        raise AssertionError("expected a challenge PriceScraperError")
+    except ps.PriceScraperError as exc:
+        assert "challenge" in str(exc).lower()
+    print("test_barchart_challenge_raises: OK")
+
+
 def test_fix_price_history_realigns() -> None:
     """The one-off corrector rebuilds the LME leg as-of each row's COMEX date."""
     import pandas as pd
@@ -161,11 +221,17 @@ if __name__ == "__main__":
     class _MP:
         def __init__(self): self._undo = []
         def setattr(self, obj, name, val):
-            self._undo.append((obj, name, getattr(obj, name)))
+            self._undo.append(("attr", obj, name, getattr(obj, name)))
             setattr(obj, name, val)
+        def delenv(self, name, raising=True):
+            self._undo.append(("env", None, name, os.environ.get(name)))
+            os.environ.pop(name, None)
         def undo(self):
-            for obj, name, val in reversed(self._undo):
-                setattr(obj, name, val)
+            for kind, obj, name, val in reversed(self._undo):
+                if kind == "env":
+                    os.environ.pop(name, None) if val is None else os.environ.__setitem__(name, val)
+                else:
+                    setattr(obj, name, val)
             self._undo.clear()
 
     test_parse_westmetall()
@@ -174,7 +240,8 @@ if __name__ == "__main__":
     test_westmetall_is_sole_lme_source()
     test_lb_to_tonne_conversion()
     test_fix_price_history_realigns()
-    for fn in (test_lme_price_on_date_nearest_prior, test_spread_aligns_lme_to_comex_session):
+    for fn in (test_barchart_history_parsing, test_barchart_challenge_raises,
+               test_lme_price_on_date_nearest_prior, test_spread_aligns_lme_to_comex_session):
         mp = _MP()
         try:
             fn(mp)

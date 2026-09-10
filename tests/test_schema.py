@@ -99,8 +99,32 @@ def test_upsert_geo() -> None:
         print("test_upsert_geo: OK", len(out), "rows")
 
 
+def test_upsert_comex_lme_history() -> None:
+    from scripts.schema import COMEX_LME_HISTORY_SCHEMA, upsert_comex_lme_history
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "comex_lme_history.parquet"
+        base = {
+            "session_date": dt.date(2026, 9, 2), "comex_contract": "HGZ26",
+            "comex_usd_lb": 6.593, "comex_usd_t": 14_535.08,
+            "lme_cash_usd_t": 14_355.0, "lme_3m_usd_t": 14_227.0,
+            "lme_price_date": dt.date(2026, 9, 2), "cme_lme_spread_usd_t": 180.08,
+            "cme_lme_spread_3m_usd_t": 308.08, "lme_cash_3m_spread_usd_t": 128.0,
+            "comex_source": "CmeWS", "retrieved_at": dt.datetime.now(dt.timezone.utc),
+        }
+        upsert_comex_lme_history([base], p)
+        out = upsert_comex_lme_history([{**base, "cme_lme_spread_3m_usd_t": 999.0}], p)
+        assert list(out.columns) == COMEX_LME_HISTORY_SCHEMA
+        assert len(out) == 1 and out.iloc[0]["cme_lme_spread_3m_usd_t"] == 999.0  # replaced
+        out = upsert_comex_lme_history([{**base, "session_date": dt.date(2026, 9, 3)}], p)
+        assert len(out) == 2 and list(out["session_date"].dt.day) == [2, 3]  # sorted, added
+        assert upsert_comex_lme_history([], p).equals(out)  # empty -> no-op
+        print("test_upsert_comex_lme_history: OK")
+
+
 if __name__ == "__main__":
     test_staleness()
     test_native_series_stops_at_stale()
     test_upsert_geo()
+    test_upsert_comex_lme_history()
     print("\nAll offline schema tests passed.")

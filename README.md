@@ -26,11 +26,12 @@ Data Architecture and Workflow
 | `scripts/cme_scraper.py`  | CME (COMEX) `Copper_Stocks.xls` — Registered / Eligible (short tons); Chrome-impersonation transport (`curl_cffi`) with a plain-`requests` fallback to get past the `/delivery_reports/` datacentre-IP block |
 | `scripts/lme_scraper.py`  | LME stock-breakdown (live + cancelled warrants, plus the per-location / per-country breakdown) + OWSR (off-warrant, plus the ASIA/EUROPE/NORTH AMERICAS region totals), via the reports JSON API behind Cloudflare (`curl_cffi`) |
 | `scripts/shfe_scraper.py` | SHFE weekly stock report (库存 + 仓单) + daily warrant report (side feed) |
-| `scripts/price_scraper.py`| COMEX copper (CME settlements API, most-active month, USD/lb; Yahoo `HG=F` fallback) vs LME cash + 3-month (Westmetall `LME_Cu_cash` table, USD/t — sole LME source) → CME−LME spread + LME cash−3M term-structure spread, all USD/t |
+| `scripts/price_scraper.py`| COMEX copper — most-active month settle, USD/lb — from **Barchart** `historical/get` (→ CmeWS settlements API → Yahoo `HG=F`), vs LME cash + 3-month (Westmetall `LME_Cu_cash` table, USD/t — sole LME source) → CME−LME spread + LME cash−3M term-structure spread, all USD/t. `get_comex_copper_history()` returns ~6 months of daily settles in one call |
 | `scripts/aggregate.py`    | runs all scrapers, converts CME short tons ×0.907185, harmonises, computes the global total, upserts `data/copper_inventory.parquet` and (best-effort) `data/lme_geo.parquet` |
 | `scripts/schema.py`       | shared column schema + inventory taxonomy + LOCF daily-calendar helper; `staleness()`, the exchange-native as-of series, and the tidy geo-parquet upsert |
 | `scripts/backfill.py`     | one-off: recover ~2 weeks of history each source still exposes |
-| `scripts/fix_price_history.py` | one-off: re-align the historical CME−LME spread — rebuild each priced row's LME leg as-of its own `comex_price_date` from Westmetall (`--dry-run` to preview) |
+| `scripts/fix_price_history.py` | one-off: re-align the historical CME−LME spread in the run log — rebuild each priced row's LME leg as-of its own `comex_price_date` from Westmetall (`--dry-run` to preview) |
+| `scripts/backfill_prices.py` | build/refresh `data/comex_lme_history.parquet` — one row per market session (COMEX settle date + LME as-of that date + spreads), from Barchart (or the CmeWS window) + Westmetall |
 | `scripts/analytics.py`    | scarcity-vs-reshuffling analytics: warrant-lifecycle / "phantom tightness" flows, rolling 30/90-day Z-score anomaly scan, configurable CME–LME arbitrage-hurdle model, hub concentration / load-out response / `diagnose_anomalies`, and a combined `scarcity_scorecard` |
 | `app.py`                  | Streamlit dashboard — overview page |
 | `pages/1_Scarcity_Analysis.py` | Streamlit dashboard — "Physical vs Paper Scarcity" page (KPI row, spatial concentration, warrant-vs-load-out, term-structure/arb band with an adjustable cost hurdle, anomaly table) |
@@ -145,14 +146,36 @@ file (e.g. the "28 Aug" file's 233,500 t shows as "01 Sep" on Westmetall).
 
 ### Price spread
 
-`comex_copper_usd_t` = Yahoo `HG=F` previous completed close (USD/lb) × 2204.62.
+`comex_copper_usd_t` = most-active COMEX copper month settle (USD/lb) × 2204.62 —
+from Barchart, else the CmeWS settlements API, else Yahoo `HG=F`.
 `lme_copper_cash_usd_t` / `lme_copper_3m_usd_t` from the Westmetall table.
-`cme_lme_spread_usd_t` = COMEX − LME cash (positive = COMEX rich to LME);
-`cme_lme_spread_3m_usd_t` = COMEX − LME 3-month;
-`lme_cash_3m_spread_usd_t` = LME cash − LME 3-month, the LME term structure
-(positive = backwardation). `comex_price_date` / `lme_price_date` record which
-session each leg is from; the spread is only filled when both legs are present.
-Either leg can fail independently without failing the run.
+
+**Same-session (market-on-close) rule.** The COMEX settlement posts ~a day after
+Westmetall's LME official, so `get_cme_lme_copper_spread` fetches the LME leg
+*as of the COMEX settlement date* — `comex_price_date == lme_price_date` on every
+row, and `cme_lme_spread_3m_usd_t == comex_copper_usd_t − lme_copper_3m_usd_t`.
+`cme_lme_spread_usd_t` = COMEX − LME cash (positive = COMEX rich);
+`lme_cash_3m_spread_usd_t` = LME cash − LME 3-month term structure (positive =
+backwardation). Either leg can fail independently without failing the run.
+
+### Spread history (`data/comex_lme_history.parquet`)
+
+The CmeWS settlements endpoint only keeps ~1 week and is flaky for the latest
+day, so the run log holds only a handful of COMEX sessions.
+`scripts/backfill_prices.py` builds a dedicated tidy parquet — one row per
+**market session**: `session_date, comex_contract, comex_usd_lb, comex_usd_t,
+lme_cash_usd_t, lme_3m_usd_t, lme_price_date, cme_lme_spread_usd_t,
+cme_lme_spread_3m_usd_t, lme_cash_3m_spread_usd_t, comex_source, retrieved_at`
+(dedupe key = `session_date`). COMEX comes from Barchart's `historical/get`
+(~6 months in one call) when reachable, else the CmeWS window; the LME legs come
+from Westmetall history. The dashboard's spread chart reads this when present and
+falls back to the run-log sessions otherwise.
+
+**Barchart access.** Barchart's `core-api` sits behind a JS challenge that a
+plain HTTP client can't always pass. Supply a browser session out of band to get
+in reliably: set `BARCHART_XSRF_TOKEN` (the decoded `XSRF-TOKEN` cookie value) or
+`BARCHART_COOKIE` (a full `Cookie:` header) as env vars / Action secrets. Without
+them the code still tries, then falls through to CmeWS.
 
 ### Geo breakdown (`data/lme_geo.parquet`)
 

@@ -33,6 +33,7 @@ from scripts.schema import (  # noqa: E402
 
 DATA_PATH = Path(__file__).parent / "data" / "copper_inventory.parquet"
 GEO_PATH = Path(__file__).parent / "data" / "lme_geo.parquet"
+SPREAD_HIST_PATH = Path(__file__).parent / "data" / "comex_lme_history.parquet"
 
 BUCKETS = ["on_warrant", "cancelled", "off_warrant"]
 BUCKET_LABELS = {"on_warrant": "On-warrant", "cancelled": "Cancelled", "off_warrant": "Off-warrant"}
@@ -76,6 +77,19 @@ def load_geo(token: float) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=300)
+def load_spread_history(token: float) -> pd.DataFrame:
+    """Multi-week CME-LME spread by market session (scripts/backfill_prices.py)."""
+    _ = token
+    if not SPREAD_HIST_PATH.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(SPREAD_HIST_PATH)
+    for c in ("session_date", "lme_price_date"):
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c])
+    return df.sort_values("session_date").reset_index(drop=True)
+
+
 def fmt(value: float | None, unit_div: float, suffix: str) -> str:
     if value is None or pd.isna(value):
         return "—"
@@ -84,6 +98,7 @@ def fmt(value: float | None, unit_div: float, suffix: str) -> str:
 
 runs = load_runs(_mtime(DATA_PATH))
 geo = load_geo(_mtime(GEO_PATH))
+spread_hist = load_spread_history(_mtime(SPREAD_HIST_PATH))
 fresh = staleness(runs)
 
 st.title("🟠 Global Copper Warehouse Inventory")
@@ -258,11 +273,14 @@ def _change_points(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[changed]
 
 
-def _day_ticks(dates) -> list[str]:
+def _day_ticks(dates):
     """One ISO tick per distinct data date — feeds `alt.Axis(values=...)` so a
-    sparse temporal axis labels every point instead of auto multi-day ticks."""
-    return [pd.Timestamp(d).isoformat()
-            for d in sorted(pd.to_datetime(pd.Series(list(dates))).dt.normalize().unique())]
+    sparse temporal axis labels every point instead of auto multi-day ticks.
+    Above ~20 distinct dates, defer to Altair's own tick selection."""
+    u = sorted(pd.to_datetime(pd.Series(list(dates))).dt.normalize().unique())
+    if len(u) > 20:
+        return alt.Undefined
+    return [pd.Timestamp(d).isoformat() for d in u]
 
 
 def composition_chart(s: pd.DataFrame) -> alt.Chart:
@@ -361,14 +379,6 @@ def _dod_cell(col: str) -> str:
     return f"{d:+,.0f} t" + (f"  ({pct:+.1f}%)" if pct is not None else "")
 
 
-def usd_delta(col: str) -> str | None:
-    """st.metric-style delta string in USD/t (None when there's no prior run)."""
-    d, pct = dod(col)
-    if d is None:
-        return None
-    return f"{d:+,.0f} USD/t" + (f"  ({pct:+.1f}%)" if pct is not None else "")
-
-
 # gentle tints per stock type: (cell background, header background)
 _TINT = {
     "On-warrant": ("#eef4fb", "#d6e5f6"),
@@ -432,82 +442,79 @@ st.divider()
 # --------------------------------------------------------------------------- #
 st.subheader("Copper price spreads")
 
-if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
-    contract = latest.get("comex_contract") or "front"
-    p = st.columns(4)
-    p[0].metric("CME − LME (3-month)", f"{latest['cme_lme_spread_3m_usd_t']:+,.0f} USD/t",
-                usd_delta("cme_lme_spread_3m_usd_t"))
-    p[1].metric("LME cash − 3-month",
-                f"{latest.get('lme_cash_3m_spread_usd_t'):+,.0f} USD/t"
-                if pd.notna(latest.get("lme_cash_3m_spread_usd_t")) else "—",
-                usd_delta("lme_cash_3m_spread_usd_t"))
-    p[2].metric(f"CME price ({contract})",
-                f"{latest['comex_copper_usd_t']:,.0f} USD/t", usd_delta("comex_copper_usd_t"))
-    p[3].metric("LME price (3-month)",
-                f"{latest['lme_copper_3m_usd_t']:,.0f} USD/t", usd_delta("lme_copper_3m_usd_t"))
-
-    cpx_d = pd.to_datetime(latest.get("comex_price_date"))
-    lme_d = pd.to_datetime(latest.get("lme_price_date"))
-    # Both legs are pulled for the same trading session (the LME leg is fetched
-    # as-of the COMEX settlement date), so the spread is a true market-on-close
-    # figure — but the CME settlements feed is flaky for the latest date, so that
-    # common session can lag "now".
-    if pd.notna(cpx_d) and pd.notna(lme_d) and cpx_d.date() != lme_d.date():
-        st.warning(f"⚠️ Spread legs {abs((cpx_d - lme_d).days)} day(s) apart "
-                   f"(COMEX {cpx_d.date()} vs LME {lme_d.date()}) — COMEX date was an "
-                   "LME holiday; using the nearest earlier LME session.")
-    _sess = cpx_d if pd.notna(cpx_d) else lme_d
-    _behind = len(pd.bdate_range(_sess, latest["run_date"])) - 1 if pd.notna(_sess) else 0
-    if _behind >= 2:
-        st.warning(f"⚠️ CME–LME spread is a **{_sess.date()}** snapshot — "
-                   f"{_behind} business days behind the last pipeline run "
-                   f"({latest['run_date'].date()}). The CME settlements feed did not "
-                   "serve a fresher date; the number is a correct MOC spread for "
-                   f"{_sess.date()}, not today's.")
-    st.caption(
-        f"Market-on-close, common session **{_sess.date() if pd.notna(_sess) else 'n/a'}**. "
-        f"**CME − LME 3M**: CME official settlement for the most-active COMEX month "
-        f"({contract}, {latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.6226 lb/t) "
-        f"minus LME 3-month, both from that session. **LME cash − 3M**: LME term "
-        f"structure (positive = backwardation). "
-        "Sources: CME Group (COMEX settle), Westmetall (LME cash + 3-month)."
-    )
-
-    _spread_cols = {
-        "cme_lme_spread_3m_usd_t": "CME − LME 3M",
-        "lme_cash_3m_spread_usd_t": "LME cash − 3M",
-    }
-    # Plot by the *market session* (the common COMEX/LME as-of date), not the
-    # pipeline run date — so a session the pipeline recorded on several runs
-    # (e.g. while the COMEX feed was frozen) is one point, not a flat streak.
-    _have = [c for c in _spread_cols if c in runs.columns]
-    _src = runs[["run_date", "comex_price_date", *_have]].dropna(subset=["comex_price_date"]).copy()
-    _src["session"] = pd.to_datetime(_src["comex_price_date"])
-    _src = (_src.sort_values("run_date").drop_duplicates("session", keep="last"))
-    _sp = (
-        _src.rename(columns=_spread_cols)
-        .melt("session", value_vars=list(_spread_cols.values()),
-              var_name="spread", value_name="usd_t")
-        .dropna(subset=["usd_t"])
-    )
-    if not _sp.empty:
-        line = alt.Chart(_sp).mark_line(point=True).encode(
-            x=alt.X("session:T", title=None,
-                    axis=alt.Axis(values=_day_ticks(_sp["session"]),
-                                  format="%b %d", labelAngle=-40, labelOverlap=False)),
-            y=alt.Y("usd_t:Q", title="USD/t"),
-            color=alt.Color("spread:N", title=None, legend=alt.Legend(orient="bottom")),
-            tooltip=[alt.Tooltip("session:T", title="session"), "spread:N",
-                     alt.Tooltip("usd_t:Q", format="+,.0f")],
-        )
-        zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#9aa0a6").encode(y="y:Q")
-        st.altair_chart((zero + line).properties(height=300), width="stretch")
-        st.caption("x-axis = market session (common COMEX/LME date). "
-                   + ("1 session so far — fills in as the pipeline runs."
-                      if _sp["session"].nunique() < 2 else
-                      f"{_sp['session'].nunique()} sessions."))
+# One row per **market session** — a real COMEX settlement date joined with the
+# LME cash / 3-month from that same session. Prefer the dedicated multi-week
+# history (scripts/backfill_prices.py -> data/comex_lme_history.parquet); fall
+# back to whatever distinct sessions the run log captured.
+if not spread_hist.empty:
+    _h = spread_hist.rename(columns={
+        "session_date": "session", "comex_usd_t": "comex_copper_usd_t",
+        "lme_3m_usd_t": "lme_copper_3m_usd_t"}).copy()
+    _src_label = f"{_h['comex_source'].iloc[-1]} (COMEX) + Westmetall (LME)"
 else:
+    _keep = ["cme_lme_spread_3m_usd_t", "lme_cash_3m_spread_usd_t",
+             "comex_copper_usd_t", "lme_copper_3m_usd_t", "comex_contract"]
+    _h = (runs[["run_date", "comex_price_date", *[c for c in _keep if c in runs.columns]]]
+          .dropna(subset=["comex_price_date"]).copy())
+    _h["session"] = pd.to_datetime(_h["comex_price_date"])
+    _h = _h.sort_values("run_date").drop_duplicates("session", keep="last")
+    _src_label = "CME Group (COMEX) + Westmetall (LME)"
+
+_h = _h.sort_values("session").reset_index(drop=True)
+if _h.empty or pd.to_numeric(_h.get("cme_lme_spread_3m_usd_t"), errors="coerce").dropna().empty:
     st.info("No price data yet — populates from the next pipeline run.")
+else:
+    _last = _h.iloc[-1]
+    contract = _last.get("comex_contract") or latest.get("comex_contract") or "front"
+
+    def _sd(col: str) -> str | None:
+        """Session-over-session change: latest minus the previous *distinct* value."""
+        v = pd.to_numeric(_h.get(col), errors="coerce").dropna()
+        if v.empty:
+            return None
+        cur = float(v.iloc[-1])
+        earlier = v[v != cur]
+        return f"{cur - (float(earlier.iloc[-1]) if not earlier.empty else cur):+,.0f} USD/t"
+
+    p = st.columns(4)
+    p[0].metric("CME − LME (3-month)", f"{_last['cme_lme_spread_3m_usd_t']:+,.0f} USD/t",
+                _sd("cme_lme_spread_3m_usd_t"))
+    _c3 = _last.get("lme_cash_3m_spread_usd_t")
+    p[1].metric("LME cash − 3-month", f"{_c3:+,.0f} USD/t" if pd.notna(_c3) else "—",
+                _sd("lme_cash_3m_spread_usd_t"))
+    p[2].metric(f"CME price ({contract})",
+                f"{_last['comex_copper_usd_t']:,.0f} USD/t", _sd("comex_copper_usd_t"))
+    p[3].metric("LME price (3-month)",
+                f"{_last['lme_copper_3m_usd_t']:,.0f} USD/t", _sd("lme_copper_3m_usd_t"))
+
+    _sess = pd.to_datetime(_last["session"])
+    _behind = len(pd.bdate_range(_sess, pd.Timestamp(dt.date.today()))) - 1
+    if _behind >= 2:
+        st.warning(f"⚠️ Latest CME−LME session is **{_sess.date()}** — {_behind} business "
+                   "days back. The COMEX settlement feed has not served a fresher date; "
+                   "each point is still a correct market-on-close spread for its own session.")
+    st.caption(
+        f"Per market session (COMEX settlement date = LME as-of date). **CME − LME 3M** = "
+        f"most-active COMEX month ({contract}) settle − LME 3-month; **LME cash − 3M** = "
+        f"LME term structure (positive = backwardation). {len(_h)} session(s). "
+        f"Sources: {_src_label}."
+    )
+
+    _long = (_h.rename(columns={"cme_lme_spread_3m_usd_t": "CME − LME 3M",
+                                "lme_cash_3m_spread_usd_t": "LME cash − 3M"})
+             .melt("session", value_vars=["CME − LME 3M", "LME cash − 3M"],
+                   var_name="spread", value_name="usd_t").dropna(subset=["usd_t"]))
+    line = alt.Chart(_long).mark_line(point=True).encode(
+        x=alt.X("session:T", title=None,
+                axis=alt.Axis(values=_day_ticks(_long["session"]),
+                              format="%b %d", labelAngle=-40, labelOverlap=False)),
+        y=alt.Y("usd_t:Q", title="USD/t"),
+        color=alt.Color("spread:N", title=None, legend=alt.Legend(orient="bottom")),
+        tooltip=[alt.Tooltip("session:T", title="session"), "spread:N",
+                 alt.Tooltip("usd_t:Q", format="+,.0f")],
+    )
+    zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#9aa0a6").encode(y="y:Q")
+    st.altair_chart((zero + line).properties(height=300), width="stretch")
 
 # --------------------------------------------------------------------------- #
 # LME by location (data/lme_geo.parquet)

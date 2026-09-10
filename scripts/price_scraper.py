@@ -32,8 +32,10 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import logging
+import os
 import re
 import time
+import urllib.parse
 from typing import Any
 
 try:
@@ -46,9 +48,16 @@ try:
 except ImportError:  # pragma: no cover
     cffi_requests = None  # type: ignore[assignment]
 
+try:
+    import pandas as pd
+except ImportError:  # pragma: no cover
+    pd = None  # type: ignore[assignment]
+
 __all__ = [
     "get_cme_lme_copper_spread",
     "get_comex_copper_price",
+    "get_comex_copper_history",
+    "get_comex_cme_history",
     "get_lme_copper_price",
     "PriceScraperError",
 ]
@@ -71,6 +80,19 @@ CME_COPPER_SETTLE_URL = (
 )
 CME_REFERER = "https://www.cmegroup.com/markets/metals/base/copper.settlements.html"
 _MONTH_CODE = "FGHJKMNQUVXZ"  # Jan..Dec
+
+# Barchart — the preferred COMEX source when reachable: its historical/get proxy
+# returns ~6 months of daily official settlements for one contract in a single
+# call (vs the CmeWS endpoint's flaky ~1-week window). It sits behind a JS
+# challenge, though, so a plain HTTP client only gets in when the challenge is
+# down or when a browser XSRF token is supplied via the BARCHART_XSRF_TOKEN /
+# BARCHART_COOKIE env vars.
+BARCHART_ROOT = "HG"  # COMEX copper futures root
+BARCHART_QUOTES_PAGE = f"https://www.barchart.com/futures/quotes/{BARCHART_ROOT}*0/futures-prices"
+BARCHART_HIST_PAGE = "https://www.barchart.com/futures/quotes/{symbol}/historical-prices"
+BARCHART_QUOTES_API = "https://www.barchart.com/proxies/core-api/v1/quotes/get"
+BARCHART_HISTORY_API = "https://www.barchart.com/proxies/core-api/v1/historical/get"
+_BARCHART_CHALLENGE = ("enable javascript", "challenge-platform", "just a moment")
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -201,17 +223,209 @@ def _comex_from_yahoo(cutoff: dt.date) -> ComexCopperPrice:
     raise PriceScraperError(f"Yahoo HG=F fallback failed: {last_exc}")
 
 
+# --------------------------------------------------------------------------- #
+# COMEX  (Barchart core-api — one call for ~6 months of daily settlements)
+# --------------------------------------------------------------------------- #
+def _barchart_headers(referer: str, token: str | None) -> dict[str, str]:
+    h = {
+        "User-Agent": _UA,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": referer,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    if token:
+        h["X-XSRF-TOKEN"] = token
+    return h
+
+
+def _barchart_token_from_env() -> str | None:
+    """A browser XSRF token / cookie header supplied out of band lets the API be
+    reached even while the JS challenge is up. ``BARCHART_XSRF_TOKEN`` is the
+    decoded token; ``BARCHART_COOKIE`` is a full ``Cookie:`` header we mine it from."""
+    tok = os.environ.get("BARCHART_XSRF_TOKEN")
+    if tok:
+        return urllib.parse.unquote(tok)
+    cookie = os.environ.get("BARCHART_COOKIE", "")
+    m = re.search(r"XSRF-TOKEN=([^;]+)", cookie)
+    return urllib.parse.unquote(m.group(1)) if m else None
+
+
+def _barchart_session(warmup_url: str):
+    """A curl_cffi session warmed on ``warmup_url`` so it carries Barchart's
+    cookies + XSRF token. Raises :class:`PriceScraperError` if the JS challenge is
+    up and no token was provided via the environment."""
+    if cffi_requests is None:  # pragma: no cover
+        raise PriceScraperError("curl_cffi is required for the Barchart feed")
+    s = cffi_requests.Session(impersonate="chrome")
+    env_token = _barchart_token_from_env()
+    if env_token:
+        s.cookies.set("XSRF-TOKEN", urllib.parse.quote(env_token))
+        cookie = os.environ.get("BARCHART_COOKIE")
+        if cookie:
+            for part in cookie.split(";"):
+                if "=" in part:
+                    k, v = part.strip().split("=", 1)
+                    s.cookies.set(k, v)
+        return s, env_token
+    try:
+        r = s.get(warmup_url, headers={"User-Agent": _UA,
+                                       "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+                  timeout=DEFAULT_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001
+        raise PriceScraperError(f"Barchart warmup failed: {exc}") from exc
+    body = (r.text or "")[:4000].lower()
+    raw = r.cookies.get("XSRF-TOKEN")
+    if not raw or any(m in body for m in _BARCHART_CHALLENGE):
+        raise PriceScraperError(
+            f"Barchart JS challenge is up (HTTP {r.status_code}, no XSRF token) — "
+            "set BARCHART_XSRF_TOKEN/BARCHART_COOKIE from a browser session to use it"
+        )
+    return s, urllib.parse.unquote(raw)
+
+
+def _barchart_get(session, token: str, url: str, params: dict, referer: str) -> list[dict]:
+    r = session.get(url, headers=_barchart_headers(referer, token), params=params,
+                    timeout=DEFAULT_TIMEOUT)
+    if r.status_code != 200 or r.content[:1] not in (b"{", b"["):
+        raise PriceScraperError(f"Barchart {url.rsplit('/', 1)[-1]} HTTP {r.status_code}")
+    data = (r.json() or {}).get("data") or []
+    return [row.get("raw", row) for row in data]
+
+
+def _barchart_active_symbol(session, token: str) -> str:
+    """Most-active COMEX copper contract (highest open interest — the liquid
+    Dec/quarterly, matching the CmeWS path), e.g. ``HGZ26``."""
+    rows = _barchart_get(
+        session, token, BARCHART_QUOTES_API,
+        {"list": "futures.contractInRoot", "root": BARCHART_ROOT,
+         "fields": "symbol,contractSymbol,contractName,lastPrice,volume,openInterest",
+         "orderBy": "openInterest", "orderDir": "desc", "raw": "1"},
+        BARCHART_QUOTES_PAGE,
+    )
+    if not rows:
+        raise PriceScraperError("Barchart: empty contract list for HG")
+
+    def _oi(row: dict) -> float:
+        try:
+            return float(str(row.get("openInterest") or 0).replace(",", ""))
+        except (TypeError, ValueError):
+            return 0.0
+
+    best = max(rows, key=_oi)  # most-active = highest open interest (don't trust order)
+    sym = str(best.get("symbol") or best.get("contractSymbol") or "").strip()
+    if not re.fullmatch(r"HG[FGHJKMNQUVXZ]\d{2}", sym):
+        raise PriceScraperError(f"Barchart: unexpected active symbol {sym!r}")
+    return sym
+
+
+def _barchart_history_df(session, token: str, symbol: str, *, limit: int):
+    rows = _barchart_get(
+        session, token, BARCHART_HISTORY_API,
+        {"symbol": symbol, "fields": "tradeTime.format(Y-m-d),openPrice,highPrice,"
+         "lowPrice,lastPrice,volume,openInterest", "type": "eod",
+         "orderBy": "tradeTime", "orderDir": "desc", "limit": str(limit), "raw": "1"},
+        BARCHART_HIST_PAGE.format(symbol=symbol),
+    )
+    if not rows:
+        raise PriceScraperError(f"Barchart: no history rows for {symbol}")
+    df = pd.DataFrame(rows).rename(columns={"tradeTime": "date", "lastPrice": "settle",
+                                            "openInterest": "open_interest"})
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for c in ("open", "high", "low", "settle", "volume", "open_interest",
+              "openPrice", "highPrice", "lowPrice"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["date", "settle"])
+    df = df[(df["settle"] > 0.1) & (df["settle"] < 100)].copy()  # sane USD/lb
+    df["contract"] = symbol
+    df["settle_usd_t"] = (df["settle"] * LB_PER_TONNE).round(2)
+    keep = ["date", "contract", "settle", "settle_usd_t", "volume", "open_interest"]
+    return df[[c for c in keep if c in df.columns]].sort_values("date").reset_index(drop=True)
+
+
+def get_comex_copper_history(*, days: int = 180) -> "pd.DataFrame":
+    """~``days`` of the most-active COMEX copper contract's daily official
+    settlements from Barchart: ``date, contract, settle, settle_usd_t, volume,
+    open_interest`` (oldest first). Raises :class:`PriceScraperError` if Barchart
+    is unreachable (JS challenge, no token)."""
+    if pd is None:  # pragma: no cover
+        raise PriceScraperError("pandas is required for get_comex_copper_history")
+    session, token = _barchart_session(BARCHART_QUOTES_PAGE)
+    symbol = _barchart_active_symbol(session, token)
+    df = _barchart_history_df(session, token, symbol, limit=max(days, 20))
+    log.info("COMEX copper history [Barchart, %s]: %d rows %s..%s",
+             symbol, len(df), df["date"].min().date(), df["date"].max().date())
+    return df
+
+
+def get_comex_cme_history(*, days: int = 12) -> "pd.DataFrame":
+    """Whatever daily COMEX settlements the CmeWS endpoint still exposes (only a
+    rolling ~1 week), same columns as :func:`get_comex_copper_history`. A thin
+    backfill fallback for when Barchart is unreachable."""
+    if pd is None or cffi_requests is None:  # pragma: no cover
+        raise PriceScraperError("pandas + curl_cffi required for get_comex_cme_history")
+    today = dt.datetime.now(dt.timezone.utc).date()
+    recs: list[dict] = []
+    for k in range(1, days + 1):
+        d = today - dt.timedelta(days=k)
+        if d.weekday() >= 5:
+            continue
+        try:
+            r = cffi_requests.get(
+                CME_COPPER_SETTLE_URL.format(date=d.strftime("%m/%d/%Y")),
+                impersonate="chrome", timeout=DEFAULT_TIMEOUT,
+                headers={"Accept": "application/json", "Referer": CME_REFERER},
+            )
+            if r.status_code != 200 or r.content[:1] != b"{":
+                continue
+            rows = [x for x in (r.json().get("settlements") or [])
+                    if x.get("month", "").lower() != "total"]
+            cand = [(x["month"], _to_settle(x.get("settle", "")),
+                     _to_settle(x.get("openInterest", "")) or 0.0) for x in rows]
+            cand = [c for c in cand if c[1] is not None and 0.1 < c[1] < 100]
+            if not cand:
+                continue
+            month, settle, _oi = max(cand, key=lambda t: t[2])
+            recs.append({"date": pd.Timestamp(d), "contract": _contract_code(month),
+                         "settle": settle, "settle_usd_t": round(settle * LB_PER_TONNE, 2)})
+        except Exception:  # noqa: BLE001
+            continue
+    if not recs:
+        raise PriceScraperError("CmeWS exposed no recent settlements")
+    return pd.DataFrame(recs).sort_values("date").reset_index(drop=True)
+
+
+def _comex_from_barchart(cutoff: dt.date) -> ComexCopperPrice:
+    df = get_comex_copper_history(days=30)
+    before = df[df["date"].dt.date < cutoff]
+    if before.empty:
+        raise PriceScraperError(f"Barchart: no settlement before {cutoff}")
+    row = before.iloc[-1]
+    d, settle = row["date"].date(), float(row["settle"])
+    log.info("COMEX copper %s [%s, Barchart settle]: %.4f USD/lb (%.2f USD/t)",
+             d, row["contract"], settle, settle * LB_PER_TONNE)
+    return ComexCopperPrice(price_date=d, usd_per_lb=settle,
+                            contract=str(row["contract"]), source="Barchart")
+
+
 def get_comex_copper_price(*, before: dt.date | None = None) -> ComexCopperPrice:
-    """Previous trading day's COMEX copper price (market-on-close). Official CME
-    settlement of the most-active month; Yahoo HG=F only if CME is unreachable."""
+    """Previous completed session's COMEX copper settlement (market-on-close) for
+    the most-active month. Source order: **Barchart** (cleanest, ~6mo history in
+    one call) → CmeWS settlements API → Yahoo ``HG=F`` continuous close."""
     if cffi_requests is None:  # pragma: no cover
         raise PriceScraperError("curl_cffi is required for the COMEX price feed")
     cutoff = before or dt.datetime.now(dt.timezone.utc).date()
-    try:
-        return _comex_from_cme(cutoff)
-    except PriceScraperError as exc:
-        log.warning("COMEX: CME settlements failed (%s); falling back to Yahoo HG=F", exc)
-        return _comex_from_yahoo(cutoff)
+    errs: list[str] = []
+    for name, fn in (("Barchart", _comex_from_barchart),
+                     ("CmeWS", _comex_from_cme),
+                     ("Yahoo", _comex_from_yahoo)):
+        try:
+            return fn(cutoff)
+        except PriceScraperError as exc:
+            errs.append(f"{name}: {exc}")
+            log.warning("COMEX: %s unavailable (%s)", name, exc)
+    raise PriceScraperError("all COMEX sources failed — " + " | ".join(errs))
 
 
 # --------------------------------------------------------------------------- #

@@ -295,3 +295,44 @@ def upsert_geo(rows: list[dict], path) -> pd.DataFrame:
     path.parent.mkdir(parents=True, exist_ok=True)
     combined.to_parquet(path, index=False)
     return combined
+
+
+# --------------------------------------------------------------------------- #
+# CME-LME spread history parquet (data/comex_lme_history.parquet)
+# --------------------------------------------------------------------------- #
+# One row per market session — a real COMEX settlement date with the LME cash /
+# 3-month from that same session. This is what the dashboard's spread chart
+# plots, so it can show weeks of history instead of the handful of sessions the
+# daily run log happens to have captured.
+COMEX_LME_HISTORY_SCHEMA: list[str] = [
+    "session_date", "comex_contract", "comex_usd_lb", "comex_usd_t",
+    "lme_cash_usd_t", "lme_3m_usd_t", "lme_price_date",
+    "cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t", "lme_cash_3m_spread_usd_t",
+    "comex_source", "retrieved_at",
+]
+
+
+def upsert_comex_lme_history(rows: list[dict], path) -> pd.DataFrame:
+    """Insert/replace CME-LME spread-history rows (keyed on ``session_date``) and
+    write ``path`` back. ``rows`` may be empty (no-op returns existing/empty)."""
+    from pathlib import Path
+
+    path = Path(path)
+    existing = (pd.read_parquet(path) if path.exists()
+                else pd.DataFrame(columns=COMEX_LME_HISTORY_SCHEMA))
+    if not rows:
+        return existing
+    new = pd.DataFrame([{k: r.get(k) for k in COMEX_LME_HISTORY_SCHEMA} for r in rows],
+                       columns=COMEX_LME_HISTORY_SCHEMA)
+    for c in ("session_date", "lme_price_date"):
+        new[c] = pd.to_datetime(new[c], errors="coerce")
+        if c in existing.columns:
+            existing[c] = pd.to_datetime(existing[c], errors="coerce")
+    new["retrieved_at"] = pd.to_datetime(new["retrieved_at"], utc=True, errors="coerce")
+    combined = pd.concat([existing, new], ignore_index=True)
+    combined = (combined.dropna(subset=["session_date"])
+                .drop_duplicates(subset=["session_date"], keep="last")
+                .sort_values("session_date").reset_index(drop=True))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_parquet(path, index=False)
+    return combined

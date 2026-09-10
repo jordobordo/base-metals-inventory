@@ -48,18 +48,30 @@ jobs:
       - name: Run aggregator
         run: python scripts/aggregate.py -v
 
+      - name: Refresh CME-LME spread history
+        # Best-effort: builds data/comex_lme_history.parquet from Barchart (or the
+        # CmeWS ~1-week window) + Westmetall. Never fails the job.
+        env:
+          BARCHART_XSRF_TOKEN: ${{ secrets.BARCHART_XSRF_TOKEN }}
+          BARCHART_COOKIE: ${{ secrets.BARCHART_COOKIE }}
+        run: python scripts/backfill_prices.py -v || echo "spread-history refresh skipped"
+
       - name: Commit refreshed parquet
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- data/copper_inventory.parquet data/lme_geo.parquet; then
-            echo "No change to the inventory parquets — nothing to commit."
+          _files=""
+          for f in data/copper_inventory.parquet data/lme_geo.parquet data/comex_lme_history.parquet; do
+            [ -f "$f" ] && _files="$_files $f"
+          done
+          if git diff --quiet -- $_files; then
+            echo "No change to the data parquets — nothing to commit."
             exit 0
           fi
 
-          git add data/copper_inventory.parquet data/lme_geo.parquet
+          git add $_files
           git commit -m "data: copper inventory $(date -u +%Y-%m-%d)"
 
           for attempt in 1 2 3; do
