@@ -30,6 +30,7 @@ Data Architecture and Workflow
 | `scripts/aggregate.py`    | runs all scrapers, converts CME short tons ×0.907185, harmonises, computes the global total, upserts `data/copper_inventory.parquet` and (best-effort) `data/lme_geo.parquet` |
 | `scripts/schema.py`       | shared column schema + inventory taxonomy + LOCF daily-calendar helper; `staleness()`, the exchange-native as-of series, and the tidy geo-parquet upsert |
 | `scripts/backfill.py`     | one-off: recover ~2 weeks of history each source still exposes |
+| `scripts/fix_price_history.py` | one-off: re-align the historical CME−LME spread — rebuild each priced row's LME leg as-of its own `comex_price_date` from Westmetall (`--dry-run` to preview) |
 | `scripts/analytics.py`    | scarcity-vs-reshuffling analytics: warrant-lifecycle / "phantom tightness" flows, rolling 30/90-day Z-score anomaly scan, configurable CME–LME arbitrage-hurdle model, hub concentration / load-out response / `diagnose_anomalies`, and a combined `scarcity_scorecard` |
 | `app.py`                  | Streamlit dashboard — overview page |
 | `pages/1_Scarcity_Analysis.py` | Streamlit dashboard — "Physical vs Paper Scarcity" page (KPI row, spatial concentration, warrant-vs-load-out, term-structure/arb band with an adjustable cost hurdle, anomaly table) |

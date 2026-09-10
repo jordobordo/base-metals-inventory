@@ -122,6 +122,41 @@ def test_spread_aligns_lme_to_comex_session(monkeypatch) -> None:
     print("test_spread_aligns_lme_to_comex_session: OK")
 
 
+def test_fix_price_history_realigns() -> None:
+    """The one-off corrector rebuilds the LME leg as-of each row's COMEX date."""
+    import pandas as pd
+
+    from scripts.fix_price_history import fix_frame
+
+    history = _parse_westmetall(_WESTMETALL_SNIPPET)  # (date, cash, 3m), newest first
+    df = pd.DataFrame([
+        {"run_date": dt.date(2026, 9, 1), "comex_price_date": dt.date(2026, 8, 28),
+         "comex_copper_usd_t": 15_000.0, "lme_copper_3m_usd_t": 99.0,
+         "lme_price_date": dt.date(2026, 9, 1), "cme_lme_spread_3m_usd_t": -1.0},
+        {"run_date": dt.date(2026, 9, 2), "comex_price_date": dt.date(2026, 8, 30),  # Sun
+         "comex_copper_usd_t": 15_100.0, "lme_copper_3m_usd_t": None,
+         "cme_lme_spread_3m_usd_t": None},
+        {"run_date": dt.date(2026, 9, 3), "comex_price_date": pd.NaT,
+         "comex_copper_usd_t": None, "cme_lme_spread_3m_usd_t": None},
+    ])
+    out, changes = fix_frame(df, history)
+    assert len(changes) == 2  # the NaT row is skipped
+
+    r0 = out.iloc[0]
+    assert pd.Timestamp(r0["lme_price_date"]).date() == dt.date(2026, 8, 28)
+    assert r0["lme_copper_3m_usd_t"] == 14_370.0                 # 28 Aug row, not 99
+    assert r0["cme_lme_spread_3m_usd_t"] == round(15_000.0 - 14_370.0, 2)
+    assert r0["cme_lme_spread_usd_t"] == round(15_000.0 - 14_535.0, 2)
+    assert r0["lme_cash_3m_spread_usd_t"] == round(14_535.0 - 14_370.0, 2)
+
+    r1 = out.iloc[1]  # 30 Aug -> nearest earlier row is 28 Aug
+    assert pd.Timestamp(r1["lme_price_date"]).date() == dt.date(2026, 8, 28)
+    assert r1["cme_lme_spread_3m_usd_t"] == round(15_100.0 - 14_370.0, 2)
+
+    assert pd.isna(out.iloc[2]["comex_copper_usd_t"])            # untouched
+    print("test_fix_price_history_realigns: OK")
+
+
 if __name__ == "__main__":
     class _MP:
         def __init__(self): self._undo = []
@@ -138,6 +173,7 @@ if __name__ == "__main__":
     test_cme_settlement_parsing()
     test_westmetall_is_sole_lme_source()
     test_lb_to_tonne_conversion()
+    test_fix_price_history_realigns()
     for fn in (test_lme_price_on_date_nearest_prior, test_spread_aligns_lme_to_comex_session):
         mp = _MP()
         try:

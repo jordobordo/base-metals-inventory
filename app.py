@@ -477,26 +477,35 @@ if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
         "cme_lme_spread_3m_usd_t": "CME − LME 3M",
         "lme_cash_3m_spread_usd_t": "LME cash − 3M",
     }
+    # Plot by the *market session* (the common COMEX/LME as-of date), not the
+    # pipeline run date — so a session the pipeline recorded on several runs
+    # (e.g. while the COMEX feed was frozen) is one point, not a flat streak.
+    _have = [c for c in _spread_cols if c in runs.columns]
+    _src = runs[["run_date", "comex_price_date", *_have]].dropna(subset=["comex_price_date"]).copy()
+    _src["session"] = pd.to_datetime(_src["comex_price_date"])
+    _src = (_src.sort_values("run_date").drop_duplicates("session", keep="last"))
     _sp = (
-        runs[["run_date", *[c for c in _spread_cols if c in runs.columns]]]
-        .rename(columns=_spread_cols)
-        .melt("run_date", var_name="spread", value_name="usd_t")
+        _src.rename(columns=_spread_cols)
+        .melt("session", value_vars=list(_spread_cols.values()),
+              var_name="spread", value_name="usd_t")
         .dropna(subset=["usd_t"])
     )
     if not _sp.empty:
-        _sp["run_date"] = pd.to_datetime(_sp["run_date"])
         line = alt.Chart(_sp).mark_line(point=True).encode(
-            x=alt.X("run_date:T", title=None,
-                    axis=alt.Axis(values=_day_ticks(_sp["run_date"]),
+            x=alt.X("session:T", title=None,
+                    axis=alt.Axis(values=_day_ticks(_sp["session"]),
                                   format="%b %d", labelAngle=-40, labelOverlap=False)),
             y=alt.Y("usd_t:Q", title="USD/t"),
             color=alt.Color("spread:N", title=None, legend=alt.Legend(orient="bottom")),
-            tooltip=["run_date:T", "spread:N", alt.Tooltip("usd_t:Q", format="+,.0f")],
+            tooltip=[alt.Tooltip("session:T", title="session"), "spread:N",
+                     alt.Tooltip("usd_t:Q", format="+,.0f")],
         )
         zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#9aa0a6").encode(y="y:Q")
         st.altair_chart((zero + line).properties(height=300), width="stretch")
-        if _sp["run_date"].nunique() < 2:
-            st.caption("1 data point so far — the lines fill in as the daily pipeline runs.")
+        st.caption("x-axis = market session (common COMEX/LME date). "
+                   + ("1 session so far — fills in as the pipeline runs."
+                      if _sp["session"].nunique() < 2 else
+                      f"{_sp['session'].nunique()} sessions."))
 else:
     st.info("No price data yet — populates from the next pipeline run.")
 
