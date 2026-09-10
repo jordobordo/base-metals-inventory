@@ -217,14 +217,27 @@ _earliest_stale = min(
 # --------------------------------------------------------------------------- #
 # KPI row
 # --------------------------------------------------------------------------- #
-k = st.columns(4)
+k = st.columns(5)
 k[0].metric("Global reported stock",
             fmt(latest.get("global_reported_stock_t"), unit_div, unit_suffix),
             delta_str("global_reported_stock_t"))
-for col, b in zip(k[1:], BUCKETS):
+k[1].metric("Grand total (incl. off-warrant)",
+            fmt(latest.get("global_total_t"), unit_div, unit_suffix),
+            delta_str("global_total_t"))
+for col, b in zip(k[2:], BUCKETS):
     col.metric(f"Global {BUCKET_LABELS[b].lower()}",
                fmt(latest.get(f"global_{b}_t"), unit_div, unit_suffix),
                delta_str(f"global_{b}_t"))
+
+st.caption(
+    "**Reported stock** = each exchange's headline published figure — CME "
+    "*Registered + Eligible*, LME *on-warrant + cancelled* (closing warrants), "
+    "SHFE *库存*. LME **off-warrant** (OWSR) is a separate T+3 report and is "
+    "**not** in any exchange's headline, so it is added on top for the "
+    "**grand total**. (CME's *Eligible* is COMEX off-warrant metal and is "
+    "already inside `cme_total`, so `global_off_warrant` mixes CME Eligible + "
+    "LME OWSR.)"
+)
 
 st.divider()
 
@@ -245,16 +258,16 @@ def _change_points(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[changed]
 
 
-def _stale_band() -> alt.Chart | None:
-    if _earliest_stale is None or timeline == "Pipeline run date":
-        return None
-    span = pd.DataFrame({"start": [_earliest_stale], "end": [series.index.max()]})
-    return alt.Chart(span).mark_rect(color="#9aa0a6", opacity=0.10).encode(
-        x="start:T", x2="end:T"
-    )
+def _day_ticks(dates) -> list[str]:
+    """One ISO tick per distinct data date — feeds `alt.Axis(values=...)` so a
+    sparse temporal axis labels every point instead of auto multi-day ticks."""
+    return [pd.Timestamp(d).isoformat()
+            for d in sorted(pd.to_datetime(pd.Series(list(dates))).dt.normalize().unique())]
 
 
-def composition_chart(s: pd.DataFrame) -> alt.LayerChart:
+def composition_chart(s: pd.DataFrame) -> alt.Chart:
+    """Spaced stacked bars — one bar per date the picture changed, so individual
+    report dates are legible (an area/step chart smeared them together)."""
     cols = [f"global_{b}_t" for b in BUCKETS]
     long = (
         (s[cols] / unit_div)
@@ -263,19 +276,24 @@ def composition_chart(s: pd.DataFrame) -> alt.LayerChart:
         .melt("date", var_name="bucket", value_name="value")
         .dropna(subset=["value"])
     )
-    area = alt.Chart(long).mark_area(interpolate="step-after", opacity=0.85).encode(
-        x=alt.X("date:T", title=None, axis=alt.Axis(format="%b %d", labelAngle=-40)),
+    long["day"] = pd.to_datetime(long["date"]).dt.strftime("%Y-%m-%d")
+    order = sorted(long["day"].unique())
+    return alt.Chart(long).mark_bar().encode(
+        x=alt.X("day:O", sort=order, title=None,
+                axis=alt.Axis(labelAngle=-40, labelOverlap=False),
+                scale=alt.Scale(paddingInner=0.35)),
         y=alt.Y("value:Q", title=unit_suffix, stack="zero"),
         color=alt.Color("bucket:N", title=None,
                         scale=alt.Scale(domain=list(_TINT_HEX), range=list(_TINT_HEX.values())),
                         legend=alt.Legend(orient="bottom")),
-        tooltip=["date:T", "bucket:N", alt.Tooltip("value:Q", format=",.0f")],
-    )
-    layers = [c for c in (_stale_band(), area) if c is not None]
-    return alt.layer(*layers).properties(height=340)
+        tooltip=[alt.Tooltip("day:O", title="date"), "bucket:N",
+                 alt.Tooltip("value:Q", format=",.0f")],
+    ).properties(height=340)
 
 
-def by_exchange_chart(s: pd.DataFrame) -> alt.LayerChart:
+def by_exchange_chart(s: pd.DataFrame):
+    """One mini panel per exchange with its **own** y-scale — CME (~700 kt) would
+    otherwise flatten LME (~240 kt) and SHFE (~60 kt) into motionless lines."""
     exs = show_exchanges or EXCHANGES
     frames = []
     for e in exs:
@@ -287,22 +305,27 @@ def by_exchange_chart(s: pd.DataFrame) -> alt.LayerChart:
         f["stale"] = s[f"{e}_stale"].values if f"{e}_stale" in s.columns else False
         frames.append(f)
     long = pd.concat(frames, ignore_index=True).dropna(subset=["value"]) if frames else pd.DataFrame()
-    base = alt.Chart(long).encode(
-        x=alt.X("date:T", title=None, axis=alt.Axis(format="%b %d", labelAngle=-40)),
-        y=alt.Y("value:Q", title=unit_suffix),
+    if long.empty:
+        return alt.Chart(pd.DataFrame({"x": []})).mark_point()
+    long["date"] = pd.to_datetime(long["date"])
+    base = alt.Chart(long).mark_line(
+        interpolate="step-after", point=alt.OverlayMarkDef(filled=True, size=28)
+    ).encode(
+        x=alt.X("date:T", title=None,
+                axis=alt.Axis(values=_day_ticks(long["date"]), format="%b %d", labelAngle=-40)),
+        y=alt.Y("value:Q", title=unit_suffix, scale=alt.Scale(zero=False)),
         color=alt.Color("exchange:N", title=None,
                         scale=alt.Scale(domain=list(_EXCH_HEX), range=list(_EXCH_HEX.values())),
-                        legend=alt.Legend(orient="bottom")),
-    )
-    line = base.mark_line(interpolate="step-after").encode(
+                        legend=None),
         strokeDash=alt.StrokeDash("stale:N", legend=None,
                                   scale=alt.Scale(domain=[False, True], range=[[1, 0], [4, 3]])),
-    )
-    pts = base.mark_point(filled=True, size=28).encode(
         tooltip=["date:T", "exchange:N", alt.Tooltip("value:Q", format=",.0f")],
     )
-    layers = [c for c in (_stale_band(), line, pts) if c is not None]
-    return alt.layer(*layers).properties(height=340)
+    return base.properties(height=104).facet(
+        row=alt.Row("exchange:N", title=None,
+                    sort=[EXCHANGE_LABELS[e] for e in EXCHANGES],
+                    header=alt.Header(labelAngle=0, labelAlign="left", labelFontWeight="bold")),
+    ).resolve_scale(y="independent")
 
 
 left, right = st.columns(2)
@@ -312,12 +335,13 @@ with left:
 with right:
     st.subheader("Total by exchange")
     st.altair_chart(by_exchange_chart(_change_points(series)), width="stretch")
-if native_view:
-    st.caption("Exchange-Native view: each line ends at that feed's last report; "
-               "the summed composition stops where any feed goes stale.")
-elif _earliest_stale is not None:
-    st.caption("Same-Day Synced view: shaded region and dashed segments are "
-               "carried-forward (stale) values.")
+st.caption(
+    "Left: global buckets stacked, one bar per date a source published. "
+    "Right: each exchange on its **own** y-scale so day-to-day moves are visible; "
+    "dashed segments are carried-forward (stale) values."
+    + ("  Exchange-Native view — each line ends at that feed's last real report."
+       if native_view else "")
+)
 
 st.subheader("Breakdown & day-over-day change")
 
@@ -445,10 +469,9 @@ if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
     )
     if not _sp.empty:
         _sp["run_date"] = pd.to_datetime(_sp["run_date"])
-        _ticks = sorted(_sp["run_date"].dt.normalize().unique())
         line = alt.Chart(_sp).mark_line(point=True).encode(
             x=alt.X("run_date:T", title=None,
-                    axis=alt.Axis(values=[pd.Timestamp(t).isoformat() for t in _ticks],
+                    axis=alt.Axis(values=_day_ticks(_sp["run_date"]),
                                   format="%b %d", labelAngle=-40, labelOverlap=False)),
             y=alt.Y("usd_t:Q", title="USD/t"),
             color=alt.Color("spread:N", title=None, legend=alt.Legend(orient="bottom")),
@@ -493,14 +516,16 @@ else:
         gl, gr = st.columns([3, 2])
         gl.dataframe(disp.style.format({c: "{:,.0f}" for c in num}, na_rep="—"),
                      width="stretch", hide_index=True)
-        top = latest_bd.nlargest(15, "on_warrant_t")[["location", "region", "on_warrant_t"]].copy()
+        top = (latest_bd[latest_bd["on_warrant_t"] > 0]
+               .nlargest(15, "on_warrant_t")[["location", "region", "on_warrant_t"]].copy())
         top["on_warrant"] = top["on_warrant_t"] / unit_div
         gr.altair_chart(
             alt.Chart(top).mark_bar(color="#2e86ab").encode(
                 x=alt.X("on_warrant:Q", title=f"On-warrant ({unit_suffix})"),
-                y=alt.Y("location:N", sort="-x", title=None),
+                y=alt.Y("location:N", sort="-x", title=None,
+                        axis=alt.Axis(labelOverlap=False, labelLimit=150)),
                 tooltip=["location:N", "region:N", alt.Tooltip("on_warrant:Q", format=",.0f")],
-            ).properties(height=360),
+            ).properties(height=max(220, 26 * len(top))),
             width="stretch",
         )
 
