@@ -453,7 +453,7 @@ if not spread_hist.empty:
     _src_label = f"{_h['comex_source'].iloc[-1]} (COMEX) + Westmetall (LME)"
 else:
     _keep = ["cme_lme_spread_3m_usd_t", "lme_cash_3m_spread_usd_t",
-             "comex_copper_usd_t", "lme_copper_3m_usd_t", "comex_contract"]
+             "comex_copper_usd_t", "lme_copper_3m_usd_t", "comex_contract", "lme_price_date"]
     _h = (runs[["run_date", "comex_price_date", *[c for c in _keep if c in runs.columns]]]
           .dropna(subset=["comex_price_date"]).copy())
     _h["session"] = pd.to_datetime(_h["comex_price_date"])
@@ -476,16 +476,26 @@ else:
         earlier = v[v != cur]
         return f"{cur - (float(earlier.iloc[-1]) if not earlier.empty else cur):+,.0f} USD/t"
 
+    _lme_asof_col = "lme_price_date" if "lme_price_date" in _h.columns else "session"
+
+    def _asof(col: str) -> str:
+        v = _last.get(col)
+        return f"as of {pd.to_datetime(v).date()}" if pd.notna(v) else "as of —"
+
     p = st.columns(4)
     p[0].metric("CME − LME (3-month)", f"{_last['cme_lme_spread_3m_usd_t']:+,.0f} USD/t",
                 _sd("cme_lme_spread_3m_usd_t"))
+    p[0].caption(_asof("session"))
     _c3 = _last.get("lme_cash_3m_spread_usd_t")
     p[1].metric("LME cash − 3-month", f"{_c3:+,.0f} USD/t" if pd.notna(_c3) else "—",
                 _sd("lme_cash_3m_spread_usd_t"))
+    p[1].caption(_asof(_lme_asof_col))
     p[2].metric(f"CME price ({contract})",
                 f"{_last['comex_copper_usd_t']:,.0f} USD/t", _sd("comex_copper_usd_t"))
+    p[2].caption(_asof("session"))
     p[3].metric("LME price (3-month)",
                 f"{_last['lme_copper_3m_usd_t']:,.0f} USD/t", _sd("lme_copper_3m_usd_t"))
+    p[3].caption(_asof(_lme_asof_col))
 
     _sess = pd.to_datetime(_last["session"])
     _behind = len(pd.bdate_range(_sess, pd.Timestamp(dt.date.today()))) - 1
