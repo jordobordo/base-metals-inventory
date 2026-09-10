@@ -18,9 +18,9 @@ from scripts.analytics import (
     arb_hurdle_frame,
     cancellation_concentration,
     diagnose_anomalies,
-    hub_warrant_status,
     loadout_response,
     location_warrant_flows,
+    location_warrant_status,
     net_arb_margin,
     net_draw_rate,
 )
@@ -30,6 +30,14 @@ _ON, _CANC = "#5b8def", "#e0a458"          # on-warrant / cancelled (app.py pale
 _TERM, _DRAW = "#8a7fc0", "#5aa469"        # term structure / draw rate
 _SPREAD, _NET, _GREY = "#d1495b", "#2e86ab", "#9aa0a6"
 _H = 320
+
+
+def _date_axis(dates, **kw) -> alt.Axis:
+    """A temporal axis with one labelled tick per real data date (no auto ticks
+    at half-day / multi-day intervals, no hidden labels)."""
+    vals = sorted({pd.Timestamp(d).normalize() for d in pd.to_datetime(list(dates))})
+    return alt.Axis(values=[v.isoformat() for v in vals], format="%b %d",
+                    labelAngle=-40, labelOverlap=False, **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -120,8 +128,8 @@ def kpi_row(runs: pd.DataFrame, band, unit_div: float, unit_suffix: str) -> None
 # 2. LME spatial concentration & warrant status
 # --------------------------------------------------------------------------- #
 def chart_spatial_concentration(geo: pd.DataFrame, unit_div: float, unit_suffix: str) -> None:
-    hs = hub_warrant_status(geo)
-    if hs.empty:
+    ls = location_warrant_status(geo)
+    if ls.empty:
         st.info("LME per-location breakdown builds from the next pipeline run "
                 "(`data/lme_geo.parquet`).")
         return
@@ -132,28 +140,38 @@ def chart_spatial_concentration(geo: pd.DataFrame, unit_div: float, unit_suffix:
         cc[0].metric(f"Top location — {conc['top_location']}",
                      f"{conc['top_share_pct']:.0f}%",
                      f"of {conc['global_cancelled_t'] / unit_div:,.0f} {unit_suffix} "
-                     "global cancellations", delta_color="off")
+                     "LME cancelled warrants", delta_color="off")
         cc[1].metric(f"Top hub — {conc['top_hub']}", f"{conc['top_hub_share_pct']:.0f}%",
-                     "of global cancellations", delta_color="off")
+                     "of LME cancelled warrants", delta_color="off")
 
-    order = hs["hub"].astype(str).tolist()
-    long = hs.melt(id_vars="hub", value_vars=["on_warrant_t", "cancelled_t"],
+    order = ls["location"].tolist()
+    long = ls.melt(id_vars=["location", "region", "hub"],
+                   value_vars=["on_warrant_t", "cancelled_t"],
                    var_name="status", value_name="t")
-    long["hub"] = long["hub"].astype(str)
     long["t"] = long["t"] / unit_div
     long["status"] = long["status"].map({"on_warrant_t": "On-warrant", "cancelled_t": "Cancelled"})
     chart = alt.Chart(long).mark_bar().encode(
-        x=alt.X("hub:N", sort=order, title=None),
-        y=alt.Y("t:Q", title=f"Warranted stock ({unit_suffix})", stack="zero"),
+        y=alt.Y("location:N", sort=order, title=None,
+                axis=alt.Axis(labelLimit=160, labelOverlap=False)),
+        x=alt.X("t:Q", title=f"Warranted stock ({unit_suffix})", stack="zero"),
         color=alt.Color("status:N", title=None,
                         scale=alt.Scale(domain=["On-warrant", "Cancelled"], range=[_ON, _CANC]),
                         legend=alt.Legend(orient="bottom")),
-        tooltip=["hub:N", "status:N", alt.Tooltip("t:Q", format=",.0f")],
-    ).properties(height=_H)
+        tooltip=["location:N", "region:N", "hub:N", "status:N",
+                 alt.Tooltip("t:Q", title=f"Stock ({unit_suffix})", format=",.0f")],
+    ).properties(height=max(240, 30 * len(order)))
     st.altair_chart(chart, width="stretch")
-    rd = pd.to_datetime(hs["report_date"].iloc[0]).date()
-    st.caption(f"LME stock-breakdown report of {rd}. Hubs: Singapore, Rotterdam, "
-               "Busan, Port Klang, US (all USA delivery points), Other.")
+
+    on_sum = ls["on_warrant_t"].sum() / unit_div
+    canc_sum = ls["cancelled_t"].sum() / unit_div
+    rd = pd.to_datetime(ls["report_date"].iloc[0]).date()
+    st.caption(
+        f"LME stock-breakdown report of {rd} — {len(order)} delivery points holding stock "
+        f"(hub in tooltip: Singapore / Rotterdam / Busan / Port Klang / US / Other). "
+        f"Bars sum to LME on-warrant **{on_sum:,.0f} {unit_suffix}** + cancelled "
+        f"**{canc_sum:,.0f} {unit_suffix}** — the LME leg only; the KPI row above is the "
+        f"CME + LME + SHFE global."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -177,7 +195,7 @@ def chart_warrant_vs_loadout(geo: pd.DataFrame, unit_div: float, unit_suffix: st
     f["date"] = pd.to_datetime(f["report_date"])
     f["dcanc"] = f["d_cancelled_t"] / unit_div
     f["dout"] = f["withdrawals_t"] / unit_div
-    xx = alt.X("date:T", title=None, axis=alt.Axis(format="%b %d", labelAngle=-40))
+    xx = alt.X("date:T", title=None, axis=_date_axis(f["date"]))
     bars = alt.Chart(f).mark_bar(color=_CANC, opacity=0.75).encode(
         x=xx, y=alt.Y("dcanc:Q", title=f"Δ Cancelled warrants ({unit_suffix})"),
         tooltip=["date:T", alt.Tooltip("dcanc:Q", title="Δ Cancelled", format="+,.0f")])
@@ -219,16 +237,19 @@ def chart_term_structure_arb(runs: pd.DataFrame, band, unit_div: float, unit_suf
     st.markdown("**Term structure vs inventory draw rate**")
     if cash is not None and cash.notna().any():
         ts = pd.DataFrame({"when": pd.to_datetime(d["when"]), "spread": cash}).dropna()
-        xx = alt.X("when:T", title=None, axis=alt.Axis(format="%b %d", labelAngle=-40))
+        nd = pd.DataFrame(columns=["when", "rate"])
+        if not ndr.empty:
+            nd = ndr.reset_index()
+            nd.columns = ["when", "rate"]
+            nd["rate"] = nd["rate"] / unit_div
+        xx = alt.X("when:T", title=None,
+                   axis=_date_axis(pd.concat([ts["when"], nd["when"]], ignore_index=True)))
         zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color=_GREY).encode(y="y:Q")
         sp = alt.Chart(ts).mark_line(color=_TERM, point=True).encode(
             x=xx, y=alt.Y("spread:Q", title="LME Cash–3M (USD/t)"),
             tooltip=["when:T", alt.Tooltip("spread:Q", format="+,.0f")])
         layers = [zero, sp]
-        if not ndr.empty:
-            nd = ndr.reset_index()
-            nd.columns = ["when", "rate"]
-            nd["rate"] = nd["rate"] / unit_div
+        if not nd.empty:
             dr = alt.Chart(nd).mark_area(color=_DRAW, opacity=0.22,
                                          line={"color": _DRAW}).encode(
                 x="when:T", y=alt.Y("rate:Q", title=f"Net draw rate ({unit_suffix}/bday)"),
@@ -250,7 +271,7 @@ def chart_term_structure_arb(runs: pd.DataFrame, band, unit_div: float, unit_suf
     a = arb.reset_index().rename(columns={"run_date": "when"})
     a["when"] = pd.to_datetime(a["when"])
     a["zero"] = 0.0
-    xx = alt.X("when:T", title=None, axis=alt.Axis(format="%b %d", labelAngle=-40))
+    xx = alt.X("when:T", title=None, axis=_date_axis(a["when"]))
     hurdle_band = alt.Chart(a).mark_area(color=_GREY, opacity=0.18).encode(
         x=xx, y=alt.Y("zero:Q", title="USD/t"), y2="transfer_cost_usd_mt:Q",
         tooltip=[alt.Tooltip("transfer_cost_usd_mt:Q", title="Cost hurdle", format=",.0f")])

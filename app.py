@@ -445,8 +445,11 @@ if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
     )
     if not _sp.empty:
         _sp["run_date"] = pd.to_datetime(_sp["run_date"])
+        _ticks = sorted(_sp["run_date"].dt.normalize().unique())
         line = alt.Chart(_sp).mark_line(point=True).encode(
-            x=alt.X("run_date:T", title=None, axis=alt.Axis(format="%b %d", labelAngle=-40)),
+            x=alt.X("run_date:T", title=None,
+                    axis=alt.Axis(values=[pd.Timestamp(t).isoformat() for t in _ticks],
+                                  format="%b %d", labelAngle=-40, labelOverlap=False)),
             y=alt.Y("usd_t:Q", title="USD/t"),
             color=alt.Color("spread:N", title=None, legend=alt.Legend(orient="bottom")),
             tooltip=["run_date:T", "spread:N", alt.Tooltip("usd_t:Q", format="+,.0f")],

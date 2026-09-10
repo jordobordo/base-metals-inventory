@@ -508,6 +508,31 @@ def hub_warrant_status(geo: pd.DataFrame, *, report_date=None) -> pd.DataFrame:
     return g.sort_values("total_t", ascending=False).reset_index(drop=True)
 
 
+def location_warrant_status(
+    geo: pd.DataFrame, *, report_date=None, drop_zero: bool = True
+) -> pd.DataFrame:
+    """Per-**location** on-warrant vs cancelled stocks for the latest (or given)
+    LME breakdown report.  Columns: ``location, region, hub, on_warrant_t,
+    cancelled_t, total_t, cancelled_share`` (%), ``report_date``; ``drop_zero``
+    hides delivery points holding nothing.  The ``on_warrant_t`` / ``cancelled_t``
+    columns sum to ``lme_on_warrant_t`` / ``lme_cancelled_t`` in the run log.
+    """
+    cols = ["location", "region", "hub", "on_warrant_t", "cancelled_t",
+            "total_t", "cancelled_share", "report_date"]
+    out = _latest_breakdown(geo, report_date)
+    if out.empty:
+        return pd.DataFrame(columns=cols)
+    rd = out["report_date"].iloc[0]
+    g = (out.groupby(["location", "region", "hub"], as_index=False, observed=True)
+         [["on_warrant_t", "cancelled_t"]].sum(min_count=1))
+    g["total_t"] = g["on_warrant_t"].fillna(0) + g["cancelled_t"].fillna(0)
+    g["cancelled_share"] = cancelled_share(g["on_warrant_t"], g["cancelled_t"])
+    g["report_date"] = rd
+    if drop_zero:
+        g = g[g["total_t"] > 0]
+    return g.sort_values("total_t", ascending=False).reset_index(drop=True)[cols]
+
+
 def cancellation_concentration(geo: pd.DataFrame, *, report_date=None) -> dict:
     """Where the cancelled tonnage sits in the latest LME breakdown:
     ``{top_location, top_cancelled_t, global_cancelled_t, top_share_pct,

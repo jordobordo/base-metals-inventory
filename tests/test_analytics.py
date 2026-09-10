@@ -29,6 +29,7 @@ from scripts.analytics import (  # noqa: E402
     hub_warrant_status,
     loadout_response,
     location_warrant_flows,
+    location_warrant_status,
     net_arb_margin,
     net_draw_rate,
     rolling_zscore,
@@ -306,6 +307,21 @@ def test_hub_warrant_status_and_concentration() -> None:
     print("test_hub_warrant_status_and_concentration: OK")
 
 
+def test_location_warrant_status() -> None:
+    geo = _mk_geo([
+        {"rd": "2026-09-07", "region": "USA", "loc": "New Orleans", "on": 10000, "canc": 60000},
+        {"rd": "2026-09-07", "region": "Singapore", "loc": "Singapore", "on": 18000, "canc": 2000},
+        {"rd": "2026-09-07", "region": "UK", "loc": "Liverpool", "on": 0, "canc": 0},  # empty
+    ])
+    ls = location_warrant_status(geo)
+    assert list(ls["location"]) == ["New Orleans", "Singapore"]  # zero-stock dropped, total desc
+    assert ls.iloc[0]["hub"] == "US" and ls.iloc[1]["hub"] == "Singapore"
+    # reconciles to the LME warrant totals (bars sum == lme_on_warrant / lme_cancelled)
+    assert ls["on_warrant_t"].sum() == 28000 and ls["cancelled_t"].sum() == 62000
+    assert location_warrant_status(geo, drop_zero=False).shape[0] == 3
+    print("test_location_warrant_status: OK")
+
+
 def test_loadout_response() -> None:
     # 14 quiet reports then a 40k cancellation spike; no metal leaves afterwards
     canc = [5000.0] * 14 + [45000.0]
@@ -385,6 +401,7 @@ if __name__ == "__main__":
     test_empty_inputs()
     test_hub_of()
     test_hub_warrant_status_and_concentration()
+    test_location_warrant_status()
     test_loadout_response()
     test_net_draw_rate()
     test_diagnose_anomalies_tags()

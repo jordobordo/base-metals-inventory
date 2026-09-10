@@ -216,8 +216,10 @@ Drain*, *Broad Regional Tightening*, *Transpacific Arb Delivery Candidate*,
 - **KPI row** — Total Reported / On-Warrant / Cancelled / Off-Warrant, plus
   *market temperature*: LME Cash–3M (labelled Backwardation / Contango) and
   CME–LME 3M (labelled Arb Open / Closed against the cost hurdle).
-- **LME spatial concentration** — On-warrant vs Cancelled stacked bars per hub,
-  with the top-location / top-hub share of global cancellations.
+- **LME spatial concentration** — On-warrant vs Cancelled stacked bars per
+  delivery location (hub in the tooltip), with the top-location / top-hub share
+  of LME cancelled warrants. Bars reconcile to `lme_on_warrant_t` /
+  `lme_cancelled_t` (the LME leg only; the KPI row is the 3-exchange global).
 - **Warrant dynamics vs physical load-out** — dual-axis Δ-cancelled-warrants vs
   gross Delivered-Out, with ▲ markers on cancellation spikes that never loaded out.
 - **Term structure & arb band** — LME Cash–3M vs the inventory draw rate, and the
