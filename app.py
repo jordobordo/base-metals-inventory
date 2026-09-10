@@ -446,14 +446,30 @@ if pd.notna(latest.get("cme_lme_spread_3m_usd_t")):
     p[3].metric("LME price (3-month)",
                 f"{latest['lme_copper_3m_usd_t']:,.0f} USD/t", usd_delta("lme_copper_3m_usd_t"))
 
-    cpx_d, lme_d = latest.get("comex_price_date"), latest.get("lme_price_date")
+    cpx_d = pd.to_datetime(latest.get("comex_price_date"))
+    lme_d = pd.to_datetime(latest.get("lme_price_date"))
+    # Both legs are pulled for the same trading session (the LME leg is fetched
+    # as-of the COMEX settlement date), so the spread is a true market-on-close
+    # figure — but the CME settlements feed is flaky for the latest date, so that
+    # common session can lag "now".
+    if pd.notna(cpx_d) and pd.notna(lme_d) and cpx_d.date() != lme_d.date():
+        st.warning(f"⚠️ Spread legs {abs((cpx_d - lme_d).days)} day(s) apart "
+                   f"(COMEX {cpx_d.date()} vs LME {lme_d.date()}) — COMEX date was an "
+                   "LME holiday; using the nearest earlier LME session.")
+    _sess = cpx_d if pd.notna(cpx_d) else lme_d
+    _behind = len(pd.bdate_range(_sess, latest["run_date"])) - 1 if pd.notna(_sess) else 0
+    if _behind >= 2:
+        st.warning(f"⚠️ CME–LME spread is a **{_sess.date()}** snapshot — "
+                   f"{_behind} business days behind the last pipeline run "
+                   f"({latest['run_date'].date()}). The CME settlements feed did not "
+                   "serve a fresher date; the number is a correct MOC spread for "
+                   f"{_sess.date()}, not today's.")
     st.caption(
-        f"Market-on-close (previous trading day). **CME − LME 3M**: CME official "
-        f"settlement for the most-active COMEX month ({contract}, "
-        f"{latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.6226 lb/t) minus "
-        f"LME 3-month. **LME cash − 3M**: LME term structure (positive = "
-        f"backwardation). As of {pd.to_datetime(cpx_d).date() if pd.notna(cpx_d) else 'n/a'} "
-        f"(COMEX) / {pd.to_datetime(lme_d).date() if pd.notna(lme_d) else 'n/a'} (LME). "
+        f"Market-on-close, common session **{_sess.date() if pd.notna(_sess) else 'n/a'}**. "
+        f"**CME − LME 3M**: CME official settlement for the most-active COMEX month "
+        f"({contract}, {latest.get('comex_copper_usd_lb'):.4f} USD/lb × 2204.6226 lb/t) "
+        f"minus LME 3-month, both from that session. **LME cash − 3M**: LME term "
+        f"structure (positive = backwardation). "
         "Sources: CME Group (COMEX settle), Westmetall (LME cash + 3-month)."
     )
 
