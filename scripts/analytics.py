@@ -670,13 +670,16 @@ def diagnose_anomalies(
     """Per-location diagnostics table (Part 5 of the scarcity page).
 
     One row per location that currently trips an ``|Z| > threshold`` alert on
-    net cancellations or load-outs, or has a re-warranting event in the last
-    ``lookback_reports`` reports.  Columns: ``location, hub, region, cancel_z,
-    loadout_z, rewarrant_events, interpretation`` (see :func:`_interpret_anomaly`
-    for the tag rules).  Empty frame when nothing is alerting.
+    net cancellations or load-outs, **or** has a re-warranting event in the
+    last ``lookback_reports`` reports — two different kinds of flag, so each
+    row also carries ``flag`` naming which one(s) fired (a re-warrant-only row
+    can have small Z-scores; that's not a bug, it just wasn't flagged by the
+    statistical test). Columns: ``location, hub, region, cancel_z, loadout_z,
+    rewarrant_events, flag, interpretation`` (see :func:`_interpret_anomaly`
+    for the tag rules). Empty frame when nothing is alerting.
     """
     cols = ["location", "hub", "region", "cancel_z", "loadout_z",
-            "rewarrant_events", "interpretation"]
+            "rewarrant_events", "flag", "interpretation"]
     if geo is None or geo.empty:
         return pd.DataFrame(columns=cols)
 
@@ -716,9 +719,16 @@ def diagnose_anomalies(
         if not (cz > threshold or lz > threshold or rw > 0):
             continue
         reg = region_of.get(n)
+        flags = []
+        if cz > threshold:
+            flags.append("Cancel Z")
+        if lz > threshold:
+            flags.append("Load-out Z")
+        if rw > 0:
+            flags.append("Re-warrant")
         recs.append({"location": n, "hub": hub_of(reg, n), "region": reg,
                      "cancel_z": round(cz, 2), "loadout_z": round(lz, 2),
-                     "rewarrant_events": rw})
+                     "rewarrant_events": rw, "flag": " + ".join(flags)})
     if not recs:
         return pd.DataFrame(columns=cols)
 

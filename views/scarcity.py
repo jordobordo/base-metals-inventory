@@ -219,9 +219,13 @@ def chart_warrant_vs_loadout(geo: pd.DataFrame, unit_div: float, unit_suffix: st
     st.altair_chart(alt.layer(*layers).resolve_scale(y="independent").properties(height=_H),
                     width="stretch")
     n_flag = 0 if unmet.empty else int((~unmet["responded"]).sum())
-    st.caption("Bars = change in cancelled warrants (left axis); line = gross Delivered-Out "
-               f"(right axis). ▲ = cancellation spike with < 50% load-out within 10 trading "
-               f"days ({n_flag} flagged) → paper hold / re-warranting.")
+    st.caption(
+        "Bars = change in cancelled warrants (left axis); line = gross Delivered-Out "
+        f"(right axis). ▲ = cancellation spike with < 50% load-out within 10 trading "
+        f"days ({n_flag} flagged) → paper hold / re-warranting. One point per LME "
+        f"breakdown report ({n} so far) — those land roughly twice a week, not daily, "
+        "so the gaps between points are expected, not missing data."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -248,17 +252,35 @@ def chart_term_structure_arb(runs: pd.DataFrame, band, unit_div: float, unit_suf
             x=xx, y=alt.Y("spread:Q", title="LME Cash–3M (USD/t)"),
             tooltip=["when:T", alt.Tooltip("spread:Q", format="+,.0f")])
         layers = [zero, sp]
+        clamped = False
         if not nd.empty:
+            # One lumpy report-catch-up day (a stale feed suddenly landing several
+            # days of movement at once) can be 10x the rest of the series and flatten
+            # everything else onto the zero line. Clamp the *displayed* range to a
+            # robust (5th-95th percentile, padded) band; the true value is still on
+            # the tooltip and the point still renders, pinned at the edge.
+            lo, hi = nd["rate"].quantile(0.05), nd["rate"].quantile(0.95)
+            pad = max((hi - lo) * 0.25, 0.5)
+            lo, hi = lo - pad, hi + pad
+            clamped = bool(((nd["rate"] < lo) | (nd["rate"] > hi)).any())
             dr = alt.Chart(nd).mark_area(color=_DRAW, opacity=0.22,
                                          line={"color": _DRAW}).encode(
-                x="when:T", y=alt.Y("rate:Q", title=f"Net draw rate ({unit_suffix}/bday)"),
+                x="when:T",
+                y=alt.Y("rate:Q", title=f"Net draw rate ({unit_suffix}/bday)",
+                        scale=alt.Scale(domain=[lo, hi], clamp=True, zero=False)),
                 tooltip=["when:T", alt.Tooltip("rate:Q", format="+,.1f")])
             layers = [dr, *layers]
         st.altair_chart(
             alt.layer(*layers).resolve_scale(y="independent").properties(height=260),
             width="stretch")
-        st.caption("Positive spread = backwardation (tight). Negative draw rate = inventory "
-                   "falling. Backwardation *with* a falling inventory ⇒ genuine physical tightness.")
+        st.caption(
+            "Positive spread = backwardation (tight). Negative draw rate = inventory "
+            "falling. Backwardation *with* a falling inventory ⇒ genuine physical tightness."
+            + (" Draw-rate axis is capped to the typical range so one outsized day "
+               "(usually a stale feed catching up several days at once, not a real "
+               "single-day move) doesn't flatten the rest — hover the point for its "
+               "true value." if clamped else "")
+        )
     else:
         st.info("LME Cash–3M spread history builds as the pipeline runs.")
 
@@ -304,7 +326,8 @@ def anomaly_table(runs: pd.DataFrame, geo: pd.DataFrame, band) -> None:
     show = diag.rename(columns={
         "location": "Location", "hub": "Hub", "region": "Region",
         "cancel_z": "Cancel Z", "loadout_z": "Load-out Z",
-        "rewarrant_events": "Re-warrant events", "interpretation": "Interpretation"})
+        "rewarrant_events": "Re-warrant events", "flag": "Flag",
+        "interpretation": "Interpretation"})
 
     def _hot(s: pd.Series) -> list[str]:
         return ["background-color:#fdecea" if pd.notna(v) and abs(v) > 2.0 else "" for v in s]
@@ -313,7 +336,12 @@ def anomaly_table(runs: pd.DataFrame, geo: pd.DataFrame, band) -> None:
         show.style.format({"Cancel Z": "{:.2f}", "Load-out Z": "{:.2f}"})
         .apply(_hot, subset=["Cancel Z", "Load-out Z"]),
         width="stretch", hide_index=True)
-    st.caption("|Z| > 2.0 vs each location's rolling 30/90-day history. The interpretation "
-               "tag is heuristic (`scripts/analytics._interpret_anomaly`): isolated vs broad "
-               "cancellations, active load-out, transpacific arb-delivery candidate, or "
-               "re-warranting / paper hold.")
+    st.caption("Two different flags, both shown in **Flag**: a statistical one "
+               "(|Z| > 2.0 on cancellations or load-outs vs. that location's rolling "
+               "30/90-day history — highlighted) and an event-based one (a re-warranting "
+               "event in the last 6 reports, which can fire even when the Z-scores are "
+               "small — cancelled tonnage quietly went back on warrant rather than showing "
+               "up as a load-out spike). The **Interpretation** tag is heuristic "
+               "(`scripts/analytics._interpret_anomaly`): isolated vs broad cancellations, "
+               "active load-out, transpacific arb-delivery candidate, or re-warranting / "
+               "paper hold.")

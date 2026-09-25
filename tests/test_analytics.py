@@ -373,6 +373,10 @@ def test_diagnose_anomalies_tags() -> None:
     assert diag.loc["Gwangyang", "interpretation"] == "Broad Regional Tightening"
     assert diag.loc["Singapore", "interpretation"] == "Transpacific Arb Delivery Candidate"
     assert diag.loc["New Orleans", "hub"] == "US"
+    # flag names which test(s) actually fired -- distinct from the interpretation tag
+    assert diag.loc["New Orleans", "flag"] == "Cancel Z"
+    assert diag.loc["Busan", "flag"] == "Cancel Z"
+    assert diag.loc["Singapore", "flag"] == "Load-out Z"
     print("test_diagnose_anomalies_tags: OK")
 
 
@@ -384,6 +388,7 @@ def test_diagnose_anomalies_empty() -> None:
     assert list(d["location"]) == ["Rotterdam"]
     assert d.iloc[0]["rewarrant_events"] >= 1
     assert d.iloc[0]["interpretation"] == "Re-warranting / Paper Hold"
+    assert d.iloc[0]["flag"] == "Re-warrant"  # a re-warrant-only row can have tiny Z-scores
     print("test_diagnose_anomalies_empty: OK")
 
 

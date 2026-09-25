@@ -18,7 +18,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.analytics import ArbCostBand, scarcity_scorecard  # noqa: E402
+from scripts.analytics import ArbCostBand  # noqa: E402
 from scripts.schema import EXCHANGE_DATE_COL, staleness  # noqa: E402
 from views.common import GEO_PATH, DATA_PATH, load_geo, load_runs, mtime, unit_controls  # noqa: E402
 from views.scarcity import (  # noqa: E402
@@ -72,19 +72,6 @@ _stale = [f"**{f}** {i['bdays_stale']}bd stale (as of {i['as_of']})"
 if _stale:
     st.warning("⚠️ carried forward — " + "  ·  ".join(_stale))
 
-# --------------------------------------------------------------------------- #
-# Verdict banner
-# --------------------------------------------------------------------------- #
-card = scarcity_scorecard(runs, geo, band=band)
-_TONE = {"Physical scarcity": "🟢", "Warehouse reshuffling / financing": "🟠",
-         "Mixed / inconclusive": "⚪"}
-v = st.columns([2, 1])
-v[0].metric("Verdict", f"{_TONE.get(card.verdict, '')} {card.verdict}")
-v[1].metric("Score", f"{card.score:+.2f}", help="-1 = reshuffling / financing … +1 = physical scarcity")
-with st.expander("Why", expanded=False):
-    for r in card.rationale:
-        st.markdown(f"- {r}")
-
 st.divider()
 st.subheader("Global inventories & market temperature")
 kpi_row(runs, band, unit_div, unit_suffix)
@@ -98,11 +85,11 @@ st.subheader("Warrant dynamics vs physical load-out")
 chart_warrant_vs_loadout(geo, unit_div, unit_suffix)
 
 st.divider()
-st.subheader("Term structure & arbitrage band")
+st.subheader("Term structure & CME–LME arbitrage")
 chart_term_structure_arb(runs, band, unit_div, unit_suffix)
 
 st.divider()
-st.subheader("Anomaly & diagnostics")
+st.subheader("Location alerts & diagnostics")
 anomaly_table(runs, geo, band)
 
 st.caption(f"Generated {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M UTC}. "
