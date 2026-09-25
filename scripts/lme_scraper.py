@@ -206,7 +206,18 @@ def _new_session(impersonate: str = DEFAULT_IMPERSONATE):
 
 def _get(sess, url: str, *, params=None, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES,
          backoff=DEFAULT_BACKOFF, expect: str = "any"):
-    """GET with retries + Cloudflare-block detection. ``expect`` in {"any","json","binary"}."""
+    """GET with retries + Cloudflare-block detection. ``expect`` in {"any","json","binary"}.
+
+    A Cloudflare-challenge response used to raise :class:`LMEBlockedError`
+    immediately, with no retry — but (as with the CME/Barchart feeds
+    elsewhere in this pipeline) datacentre-runner challenges are often
+    transient per-request rather than a deterministic block, so it now gets
+    the same retry+backoff treatment as any other retryable failure. Only
+    once every attempt has failed does it raise — as ``LMEBlockedError``
+    specifically if the *last* failure was a Cloudflare marker, so callers
+    that fail fast on a genuine block (see ``get_lme_copper_warrants``) still
+    do — otherwise the generic ``LMEScraperError``.
+    """
     last: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
@@ -218,14 +229,17 @@ def _get(sess, url: str, *, params=None, timeout=DEFAULT_TIMEOUT, retries=DEFAUL
             continue
 
         body = resp.content or b""
-        if resp.status_code in (403, 429, 503) or any(m in body[:4096] for m in _CF_MARKERS):
-            if any(m in body[:4096] for m in _CF_MARKERS):
-                raise LMEBlockedError(
+        is_cf = any(m in body[:4096] for m in _CF_MARKERS)
+        if resp.status_code in (403, 429, 503) or is_cf:
+            last = (
+                LMEBlockedError(
                     f"Cloudflare challenge on {url} (HTTP {resp.status_code}); "
                     "curl_cffi impersonation did not pass."
-                )
-            last = LMEScraperError(f"HTTP {resp.status_code} for {url}")
-            log.warning("LME: HTTP %s on attempt %d for %s", resp.status_code, attempt, url)
+                ) if is_cf else LMEScraperError(f"HTTP {resp.status_code} for {url}")
+            )
+            log.warning("LME: %s on attempt %d for %s",
+                        "Cloudflare challenge" if is_cf else f"HTTP {resp.status_code}",
+                        attempt, url)
             _sleep(attempt, retries, backoff)
             continue
 
@@ -238,6 +252,8 @@ def _get(sess, url: str, *, params=None, timeout=DEFAULT_TIMEOUT, retries=DEFAUL
             raise LMEParseError(f"expected an Excel workbook from {url}, got {body[:32]!r}")
         return resp
 
+    if isinstance(last, LMEBlockedError):
+        raise last
     raise LMEScraperError(f"LME GET failed after {retries} attempts: {url}") from last
 
 

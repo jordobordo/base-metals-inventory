@@ -20,7 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.lme_scraper import (  # noqa: E402
+    LMEBlockedError,
     _date_from_name,
+    _get,
     _to_number,
     parse_lme_offwarrant,
     parse_lme_offwarrant_regions,
@@ -29,6 +31,24 @@ from scripts.lme_scraper import (  # noqa: E402
 )
 
 FIX = ROOT / "tests" / "fixtures"
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, content: bytes):
+        self.status_code = status_code
+        self.content = content
+
+
+class _FakeSession:
+    """Returns canned responses in order, one per ``.get()`` call."""
+
+    def __init__(self, responses: list[_FakeResp]):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def get(self, url, *, params=None, timeout=None):
+        self.calls += 1
+        return self._responses[min(self.calls, len(self._responses)) - 1]
 
 
 def test_parse_2026_sample() -> None:
@@ -100,6 +120,34 @@ def test_parse_offwarrant_regions() -> None:
     print("test_parse_offwarrant_regions: OK", by)
 
 
+def test_get_retries_cloudflare_challenge() -> None:
+    """A Cloudflare-marker response used to raise immediately with no retry;
+    it now gets the same retry+backoff as any other transient failure, since
+    (like CME/Barchart) the challenge is often per-request, not a hard block."""
+    cf_body = b"<html>Just a moment...</html>"
+    ok_body = b'{"ok": true}'
+    sess = _FakeSession([_FakeResp(403, cf_body), _FakeResp(403, cf_body), _FakeResp(200, ok_body)])
+    resp = _get(sess, "https://example.test/x", retries=3, backoff=0.001, expect="json")
+    assert resp.content == ok_body
+    assert sess.calls == 3  # two challenges, then it got through
+    print("test_get_retries_cloudflare_challenge: OK")
+
+
+def test_get_raises_blocked_after_exhausting_retries() -> None:
+    """Still genuinely blocked after every retry -> LMEBlockedError (not a
+    generic wrapped error), so fail-fast callers can tell blocked apart from
+    other failures."""
+    cf_body = b"<html>Just a moment... cf-chl</html>"
+    sess = _FakeSession([_FakeResp(403, cf_body)] * 3)
+    try:
+        _get(sess, "https://example.test/x", retries=3, backoff=0.001)
+        raise AssertionError("expected LMEBlockedError")
+    except LMEBlockedError:
+        pass
+    assert sess.calls == 3
+    print("test_get_raises_blocked_after_exhausting_retries: OK")
+
+
 def test_date_from_name() -> None:
     assert _date_from_name("Metals Reports 26 Aug 2026") == dt.date(2026, 8, 26)
     assert _date_from_name("Metals Reports_20260826.xls") == dt.date(2026, 8, 26)
@@ -125,4 +173,6 @@ if __name__ == "__main__":
     test_parse_offwarrant()
     test_parse_locations()
     test_parse_offwarrant_regions()
+    test_get_retries_cloudflare_challenge()
+    test_get_raises_blocked_after_exhausting_retries()
     print("\nAll offline LME tests passed.")
