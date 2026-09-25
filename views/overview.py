@@ -71,17 +71,23 @@ def _native_series(runs: pd.DataFrame) -> pd.DataFrame:
     return s.set_index("date") if not s.empty and "date" in s.columns else pd.DataFrame()
 
 
-def _dod(runs: pd.DataFrame, col: str) -> tuple[float | None, float | None]:
+def _dod(runs: pd.DataFrame, col: str):
+    """(delta, pct, as_of) for `col`'s latest vs. previous *distinct* value.
+    `as_of` is the report date the *current* value is from -- each KPI's delta
+    can come from a different underlying report-date transition than its
+    neighbours (they're each "this column's own most recent change", not "the
+    same reference date for every column"), so it's shown per metric rather
+    than assumed to line up across the row."""
     nat = _native_series(runs)
     if col in getattr(nat, "columns", []):
         vals = pd.to_numeric(nat[col], errors="coerce").dropna()
     else:
         d = build_daily_series(runs)
-        if col not in d.columns:
-            return None, None
-        vals = pd.to_numeric(d[col], errors="coerce").dropna()
+        if col not in d.columns or "date" not in d.columns:
+            return None, None, None
+        vals = pd.to_numeric(d.set_index("date")[col], errors="coerce").dropna()
     if vals.empty:
-        return None, None
+        return None, None, None
     cur = float(vals.iloc[-1])
     earlier = vals[vals != cur]
     prv = float(earlier.iloc[-1]) if not earlier.empty else cur  # flat window -> 0 change
@@ -92,11 +98,11 @@ def _dod(runs: pd.DataFrame, col: str) -> tuple[float | None, float | None]:
         pct = delta / prv * 100.0
     else:
         pct = None
-    return delta, pct
+    return delta, pct, vals.index[-1].date()
 
 
 def _delta_str(runs: pd.DataFrame, col: str, unit_div: float, unit_suffix: str) -> str | None:
-    d, pct = _dod(runs, col)
+    d, pct, _asof = _dod(runs, col)
     if d is None:
         return None
     return f"{d / unit_div:+,.0f} {unit_suffix}" + (f"  ({pct:+.1f}%)" if pct is not None else "")
@@ -104,7 +110,7 @@ def _delta_str(runs: pd.DataFrame, col: str, unit_div: float, unit_suffix: str) 
 
 def _dod_cell(runs: pd.DataFrame, col: str) -> str:
     """DoD change of `col` in tonnes with the % change in brackets (table cell)."""
-    d, pct = _dod(runs, col)
+    d, pct, _asof = _dod(runs, col)
     if d is None:
         return "—"
     return f"{d:+,.0f} t" + (f"  ({pct:+.1f}%)" if pct is not None else "")
@@ -115,17 +121,18 @@ def _dod_cell(runs: pd.DataFrame, col: str) -> str:
 # --------------------------------------------------------------------------- #
 def kpi_row(runs: pd.DataFrame, unit_div: float, unit_suffix: str) -> None:
     latest = runs.iloc[-1]
+
+    def _metric(col_container, label: str, col: str) -> None:
+        _delta, _pct, asof = _dod(runs, col)
+        col_container.metric(label, fmt(latest.get(col), unit_div, unit_suffix),
+                             _delta_str(runs, col, unit_div, unit_suffix))
+        col_container.caption(f"as of {asof}" if asof else "as of —")
+
     k = st.columns(5)
-    k[0].metric("Global reported stock",
-                fmt(latest.get("global_reported_stock_t"), unit_div, unit_suffix),
-                _delta_str(runs, "global_reported_stock_t", unit_div, unit_suffix))
-    k[1].metric("Grand total (incl. off-warrant)",
-                fmt(latest.get("global_total_t"), unit_div, unit_suffix),
-                _delta_str(runs, "global_total_t", unit_div, unit_suffix))
+    _metric(k[0], "Global reported stock", "global_reported_stock_t")
+    _metric(k[1], "Grand total (incl. off-warrant)", "global_total_t")
     for col, b in zip(k[2:], BUCKETS):
-        col.metric(f"Global {BUCKET_LABELS[b].lower()}",
-                   fmt(latest.get(f"global_{b}_t"), unit_div, unit_suffix),
-                   _delta_str(runs, f"global_{b}_t", unit_div, unit_suffix))
+        _metric(col, f"Global {BUCKET_LABELS[b].lower()}", f"global_{b}_t")
     st.caption(
         "**Reported stock** = each exchange's headline published figure — CME "
         "*Registered + Eligible*, LME *on-warrant + cancelled* (closing warrants), "
@@ -133,7 +140,9 @@ def kpi_row(runs: pd.DataFrame, unit_div: float, unit_suffix: str) -> None:
         "**not** in any exchange's headline, so it is added on top for the "
         "**grand total**. (CME's *Eligible* is COMEX off-warrant metal and is "
         "already inside `cme_total`, so `global_off_warrant` mixes CME Eligible + "
-        "LME OWSR.)"
+        "LME OWSR.) Each metric's **as of** date is its own most recent report-to-"
+        "report change — they can differ across the row, so deltas don't "
+        "necessarily add up across metrics the way the headline totals do."
     )
 
 
