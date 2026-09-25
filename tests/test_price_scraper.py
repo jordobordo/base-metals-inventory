@@ -34,12 +34,13 @@ _WESTMETALL_SNIPPET = """
 
 def test_parse_westmetall() -> None:
     rows = _parse_westmetall(_WESTMETALL_SNIPPET)
-    assert rows[0] == (dt.date(2026, 9, 1), 14_395.50, 14_215.00)  # newest first
+    assert rows[0] == (dt.date(2026, 9, 1), 14_395.50, 14_215.00, 233_500.0)  # newest first
     assert rows[-1][0] == dt.date(2026, 8, 27)
     assert len(rows) == 3
     # cash − 3-month term-structure spread (positive = backwardation)
-    _, cash, m3 = rows[0]
+    _, cash, m3, stock = rows[0]
     assert round(cash - m3, 2) == 180.50
+    assert stock == 233_500.0  # "LME Copper stock" column
     print("test_parse_westmetall: OK", rows[0])
 
 
@@ -91,6 +92,7 @@ def test_lme_price_on_date_nearest_prior(monkeypatch) -> None:
     exact = ps.get_lme_copper_price(on=dt.date(2026, 8, 28))
     assert exact.price_date == dt.date(2026, 8, 28)
     assert exact.three_month_usd_per_tonne == 14_370.0
+    assert exact.stock_tonnes == 234_275.0  # "LME Copper stock" column
     holiday = ps.get_lme_copper_price(on=dt.date(2026, 8, 31))  # 29-31 Aug absent
     assert holiday.price_date == dt.date(2026, 8, 28)
     try:
@@ -116,6 +118,7 @@ def test_spread_aligns_lme_to_comex_session(monkeypatch) -> None:
     assert rec["comex_price_date"] == dt.date(2026, 8, 28)
     assert rec["lme_price_date"] == dt.date(2026, 8, 28)      # aligned, not 2026-09-01
     assert rec["lme_copper_3m_usd_t"] == 14_370.00            # the 28 Aug row
+    assert rec["lme_stock_westmetall_t"] == 234_275.00         # "LME Copper stock" column
     cx_t = round(6.60 * LB_PER_TONNE, 2)
     assert rec["cme_lme_spread_3m_usd_t"] == round(cx_t - 14_370.00, 2)
     assert rec["cme_lme_spread_usd_t"] == round(cx_t - 14_535.00, 2)
@@ -188,7 +191,7 @@ def test_fix_price_history_realigns() -> None:
 
     from scripts.fix_price_history import fix_frame
 
-    history = _parse_westmetall(_WESTMETALL_SNIPPET)  # (date, cash, 3m), newest first
+    history = _parse_westmetall(_WESTMETALL_SNIPPET)  # (date, cash, 3m, stock), newest first
     df = pd.DataFrame([
         {"run_date": dt.date(2026, 9, 1), "comex_price_date": dt.date(2026, 8, 28),
          "comex_copper_usd_t": 15_000.0, "lme_copper_3m_usd_t": 99.0,
@@ -208,6 +211,7 @@ def test_fix_price_history_realigns() -> None:
     assert r0["cme_lme_spread_3m_usd_t"] == round(15_000.0 - 14_370.0, 2)
     assert r0["cme_lme_spread_usd_t"] == round(15_000.0 - 14_535.0, 2)
     assert r0["lme_cash_3m_spread_usd_t"] == round(14_535.0 - 14_370.0, 2)
+    assert r0["lme_stock_westmetall_t"] == 234_275.0             # "LME Copper stock" column
 
     r1 = out.iloc[1]  # 30 Aug -> nearest earlier row is 28 Aug
     assert pd.Timestamp(r1["lme_price_date"]).date() == dt.date(2026, 8, 28)

@@ -18,9 +18,13 @@ Sources (both free, no key):
                    (Westmetall carries no COMEX data, so this leg has no
                    Westmetall path.)
   * LME copper   : the Westmetall "LME_Cu_cash" table — LME Copper
-                   Cash-Settlement + 3-month, one row per trading day. Plain HTML,
-                   no Cloudflare, and it is already the reference the rest of the
-                   repo sanity-checks ``lme_total_t`` against.
+                   Cash-Settlement + 3-month + closing stock, one row per trading
+                   day. Plain HTML, no Cloudflare — more reliable than the LME
+                   site's own (Cloudflare-fronted) breakdown report, so its stock
+                   column is now the **preferred source for ``lme_total_t``** in
+                   the harmonised parquet (``aggregate._compute_totals``); the
+                   LME site is still the only source for the on-warrant /
+                   cancelled *split* and the per-location breakdown.
 
 Both legs soft-fail independently; :func:`get_cme_lme_copper_spread` returns
 whatever it could get and only fills the spread when both legs are present
@@ -126,6 +130,7 @@ class LmeCopperPrice:
     price_date: dt.date
     cash_usd_per_tonne: float | None
     three_month_usd_per_tonne: float | None
+    stock_tonnes: float | None = None  # Westmetall's own "LME Copper stock" column
     source: str = "Westmetall"
 
 
@@ -459,8 +464,12 @@ def _fetch_westmetall(url: str) -> str:
 def get_lme_copper_price(
     *, before: dt.date | None = None, on: dt.date | None = None
 ) -> LmeCopperPrice:
-    """LME copper Cash-Settlement + 3-month from the Westmetall ``LME_Cu_cash``
-    table. This is the single LME price source (no lme.com path).
+    """LME copper Cash-Settlement + 3-month **and** headline stock from the
+    Westmetall ``LME_Cu_cash`` table. This is the single LME price source (no
+    lme.com path) — and, per the ``LME Copper stock`` column it also carries,
+    the preferred source for ``lme_total_t`` too (see
+    ``aggregate._compute_totals``): it's a plain HTTP table with no Cloudflare
+    gate, so it stays up when the LME site's own breakdown report is blocked.
 
     ``on``     — the row **for that trading date**, or the nearest earlier one if
                  that date is a holiday. Use it to date-align the LME leg with the
@@ -470,7 +479,7 @@ def get_lme_copper_price(
                  standalone "previous completed session" behaviour.
     """
     html = _fetch_westmetall(WESTMETALL_LME_CU)
-    parsed = _parse_westmetall(html)  # (date, cash, 3m), newest first
+    parsed = _parse_westmetall(html)  # (date, cash, 3m, stock), newest first
     if on is not None:
         on = on.date() if isinstance(on, dt.datetime) else on
         rows = [r for r in parsed if r[0] <= on]
@@ -481,15 +490,16 @@ def get_lme_copper_price(
         rows = [r for r in parsed if r[0] < cutoff]
         if not rows:
             raise PriceScraperError(f"Westmetall: no LME copper row before {cutoff}")
-    d, cash, m3 = rows[0]
-    log.info("LME copper %s [Westmetall%s]: cash %.2f, 3m %s",
-             d, f", as of {on}" if on else "", cash, m3)
+    d, cash, m3, stock = rows[0]
+    log.info("LME copper %s [Westmetall%s]: cash %.2f, 3m %s, stock %s",
+             d, f", as of {on}" if on else "", cash, m3, stock)
     return LmeCopperPrice(price_date=d, cash_usd_per_tonne=cash,
-                          three_month_usd_per_tonne=m3, source="Westmetall")
+                          three_month_usd_per_tonne=m3, stock_tonnes=stock,
+                          source="Westmetall")
 
 
-def _parse_westmetall(html: str) -> list[tuple[dt.date, float, float | None]]:
-    out: list[tuple[dt.date, float, float | None]] = []
+def _parse_westmetall(html: str) -> list[tuple[dt.date, float, float | None, float | None]]:
+    out: list[tuple[dt.date, float, float | None, float | None]] = []
     for tr in _RE_TR.findall(html):
         cells = [_RE_TAG.sub("", c).strip() for c in _RE_TD.findall(tr)]
         cells = [c for c in cells if c]
@@ -500,8 +510,9 @@ def _parse_westmetall(html: str) -> list[tuple[dt.date, float, float | None]]:
             continue
         cash = _to_price(cells[1])
         m3 = _to_price(cells[2]) if len(cells) > 2 else None
+        stock = _to_price(cells[3]) if len(cells) > 3 else None  # "LME Copper stock" column
         if cash is not None:
-            out.append((d, cash, m3))
+            out.append((d, cash, m3, stock))
     out.sort(key=lambda t: t[0], reverse=True)
     return out
 
@@ -542,7 +553,8 @@ def get_cme_lme_copper_spread() -> dict[str, Any]:
         "comex_copper_usd_lb": None, "comex_copper_usd_t": None,
         "comex_price_date": None, "comex_contract": None,
         "lme_copper_cash_usd_t": None, "lme_copper_3m_usd_t": None,
-        "lme_cash_3m_spread_usd_t": None, "lme_price_date": None,
+        "lme_cash_3m_spread_usd_t": None, "lme_stock_westmetall_t": None,
+        "lme_price_date": None,
         "cme_lme_spread_usd_t": None, "cme_lme_spread_3m_usd_t": None,
         "price_legs_ok": [], "price_legs_failed": [],
     }
@@ -567,6 +579,8 @@ def get_cme_lme_copper_spread() -> dict[str, Any]:
                                    if lme.cash_usd_per_tonne is not None else None),
             lme_copper_3m_usd_t=(round(lme.three_month_usd_per_tonne, 2)
                                  if lme.three_month_usd_per_tonne is not None else None),
+            lme_stock_westmetall_t=(round(lme.stock_tonnes, 2)
+                                    if lme.stock_tonnes is not None else None),
             lme_price_date=lme.price_date,
         )
         rec["price_legs_ok"].append("LME")

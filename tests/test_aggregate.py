@@ -51,7 +51,7 @@ _PRICE = {
     "comex_copper_usd_lb": 6.6005, "comex_copper_usd_t": 14_551.61,
     "comex_price_date": dt.date(2026, 9, 1), "comex_contract": "HGZ26",
     "lme_copper_cash_usd_t": 14_395.50, "lme_copper_3m_usd_t": 14_274.50,
-    "lme_cash_3m_spread_usd_t": 121.00,
+    "lme_cash_3m_spread_usd_t": 121.00, "lme_stock_westmetall_t": 235_575.0,
     "lme_price_date": dt.date(2026, 9, 1),
     "cme_lme_spread_usd_t": 156.11, "cme_lme_spread_3m_usd_t": 277.11,
     "price_legs_ok": ["COMEX", "LME"], "price_legs_failed": [],
@@ -85,7 +85,9 @@ def test_harmonisation_and_global_total(monkeypatch) -> None:
     assert row["lme_on_warrant_t"] == 107_050.0
     assert row["lme_cancelled_t"] == 128_525.0
     assert row["lme_off_warrant_t"] == 117_155.0
-    assert row["lme_total_t"] == 235_575.0              # closing (live + cancelled)
+    assert row["lme_total_t"] == 235_575.0              # closing (live + cancelled);
+                                                          # here Westmetall & the LME
+                                                          # breakdown agree (both 235,575)
 
     assert row["shfe_on_warrant_t"] == 31_462.0
     assert row["shfe_cancelled_t"] == 40_966.0          # implied non-warranted (库存 − 仓单)
@@ -130,6 +132,31 @@ def test_carry_forward_on_failure(monkeypatch) -> None:
     assert row["shfe_on_warrant_t"] == 31_462.0
     assert row["global_total_t"] is not None          # still computed
     print("test_carry_forward_on_failure: OK")
+
+
+def test_lme_total_prefers_westmetall_on_breakdown_failure(monkeypatch) -> None:
+    """The LME breakdown report (Cloudflare-fronted) is blocked, but Westmetall
+    (plain HTTP, fetched alongside the price leg) still has a fresh stock figure.
+    lme_total_t should use that fresh number, not the stale carried-forward total
+    -- even though the on-warrant/cancelled split itself is genuinely stale
+    (only the breakdown report provides that split)."""
+    _patch_all(monkeypatch)
+    good = agg.collect()
+    prev = agg._row_to_frame(good).iloc[0]
+
+    fresh_price = {**_PRICE, "lme_stock_westmetall_t": 240_000.0}
+    _patch_all(monkeypatch, lme_w=agg.LMEScraperError("cloudflare block"), price=fresh_price)
+    row = agg.collect(prev_row=prev)
+
+    assert row["sources_failed"] == "LME"
+    assert row["lme_stale"] is True
+    # split carried forward from the previous run, untouched
+    assert row["lme_on_warrant_t"] == 107_050.0
+    assert row["lme_cancelled_t"] == 128_525.0
+    # total is FRESH from Westmetall, not the stale carried 235,575.0
+    assert row["lme_total_t"] == 240_000.0
+    assert row["global_reported_stock_t"] == round(row["cme_total_t"] + 240_000.0 + 72_428.0, 3)
+    print("test_lme_total_prefers_westmetall_on_breakdown_failure: OK")
 
 
 def test_strict_raises(monkeypatch) -> None:
@@ -224,6 +251,7 @@ if __name__ == "__main__":
             self._undo.clear()
 
     for fn in (test_harmonisation_and_global_total, test_carry_forward_on_failure,
+               test_lme_total_prefers_westmetall_on_breakdown_failure,
                test_strict_raises, test_parquet_upsert_and_locf, test_asof_series):
         mp = _MP()
         try:

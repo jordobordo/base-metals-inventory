@@ -16,9 +16,14 @@ This script rebuilds the LME leg for every priced row **as of that row's own
 once), and recomputes:
 
     lme_copper_cash_usd_t, lme_copper_3m_usd_t, lme_price_date,
-    lme_cash_3m_spread_usd_t, cme_lme_spread_usd_t, cme_lme_spread_3m_usd_t
+    lme_cash_3m_spread_usd_t, lme_stock_westmetall_t,
+    cme_lme_spread_usd_t, cme_lme_spread_3m_usd_t
 
-COMEX columns and every non-price column are left untouched. Rows without a
+COMEX columns and every non-price column are left untouched — in particular
+``lme_total_t`` / ``global_reported_stock_t`` / ``global_total_t`` are **not**
+retroactively recomputed here, so historical inventory totals stay exactly as
+they were harmonised at the time (only new pipeline runs prefer Westmetall's
+stock column going forward; see ``aggregate._compute_totals``). Rows without a
 COMEX price (the first days) are skipped.
 
     python scripts/fix_price_history.py [--parquet PATH] [--dry-run]
@@ -48,11 +53,12 @@ log = logging.getLogger("fix_price_history")
 
 _FIX_COLS = [
     "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_price_date",
-    "lme_cash_3m_spread_usd_t", "cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t",
+    "lme_cash_3m_spread_usd_t", "lme_stock_westmetall_t",
+    "cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t",
 ]
 
 
-def _westmetall_history() -> list[tuple[dt.date, float, float | None]]:
+def _westmetall_history() -> list[tuple[dt.date, float, float | None, float | None]]:
     rows = _parse_westmetall(_fetch_westmetall(WESTMETALL_LME_CU))  # newest first
     if not rows:
         raise RuntimeError("Westmetall returned no LME rows")
@@ -61,11 +67,11 @@ def _westmetall_history() -> list[tuple[dt.date, float, float | None]]:
     return rows
 
 
-def _asof(history: list[tuple[dt.date, float, float | None]], day: dt.date):
-    """Newest Westmetall row on/before ``day`` -> (date, cash, three_month)."""
-    for d, cash, m3 in history:  # history is newest-first
+def _asof(history: list[tuple[dt.date, float, float | None, float | None]], day: dt.date):
+    """Newest Westmetall row on/before ``day`` -> (date, cash, three_month, stock)."""
+    for d, cash, m3, stock in history:  # history is newest-first
         if d <= day:
-            return d, cash, m3
+            return d, cash, m3, stock
     return None
 
 
@@ -83,13 +89,14 @@ def fix_frame(df: pd.DataFrame, history) -> tuple[pd.DataFrame, list[dict]]:
             log.warning("no Westmetall LME row on/before %s (run %s) — skipped",
                         cx_date, row.get("run_date"))
             continue
-        lme_date, cash, m3 = hit
+        lme_date, cash, m3, stock = hit
         cx_t = float(cx_t)
         new = {
             "lme_copper_cash_usd_t": round(cash, 2),
             "lme_copper_3m_usd_t": round(m3, 2) if m3 is not None else None,
             "lme_price_date": pd.Timestamp(lme_date),
             "lme_cash_3m_spread_usd_t": round(cash - m3, 2) if m3 is not None else None,
+            "lme_stock_westmetall_t": round(stock, 2) if stock is not None else None,
             "cme_lme_spread_usd_t": round(cx_t - cash, 2),
             "cme_lme_spread_3m_usd_t": round(cx_t - m3, 2) if m3 is not None else None,
         }

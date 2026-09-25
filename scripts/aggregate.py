@@ -19,7 +19,13 @@ sum and equals that exchange's own reported total:
           off = Eligible x 0.907185      total = Registered + Eligible (tonnes)
 
     LME   on = Open Tonnage (live)       cancelled = Cancelled Tonnage
-          off = OWSR GLOBAL TOTAL (CU)   total = on + cancelled + off
+          off = OWSR GLOBAL TOTAL (CU)   total = on + cancelled  (off is separate,
+                                          see _compute_totals — a "LME stock" quote
+                                          never includes off-warrant)
+          `total` prefers the Westmetall "LME Copper stock" column (a plain HTTP
+          table, no Cloudflare) over the LME site's own Cloudflare-fronted
+          breakdown report, which only supplies `on` / `cancelled` and the
+          per-location split now. See _compute_totals.
 
     SHFE  on = 仓单 (futures warrants, weekly)
           cancelled = 库存 - 仓单  (implied non-warranted; NOT a real cancelled figure)
@@ -141,7 +147,8 @@ def _run_shfe(enrich_with_daily: bool) -> dict[str, Any]:
 
 _PRICE_COLS = [
     "comex_copper_usd_lb", "comex_copper_usd_t", "comex_price_date", "comex_contract",
-    "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_cash_3m_spread_usd_t", "lme_price_date",
+    "lme_copper_cash_usd_t", "lme_copper_3m_usd_t", "lme_cash_3m_spread_usd_t",
+    "lme_stock_westmetall_t", "lme_price_date",
     "cme_lme_spread_usd_t", "cme_lme_spread_3m_usd_t",
 ]
 
@@ -251,8 +258,21 @@ def _compute_totals(row: dict[str, Any], lme_closing_t: float | None) -> None:
     #   LME  -> Closing Stock (live + cancelled)      [matches Westmetall / LME site]
     #   SHFE -> 库存 physical inventory                [matches SMM]
     # LME off-warrant (OWSR) is a SEPARATE figure that no "LME stock" quote includes.
+    #
+    # lme_total_t source preference: Westmetall's "LME Copper stock" column (fetched
+    # alongside the LME price leg, plain HTTP, no Cloudflare) is more reliable than
+    # the LME site's own breakdown report, so it wins when present. Falls back to
+    # the breakdown's own Closing Stock figure, then to on+cancelled (which, on a
+    # breakdown-scraper failure, are themselves carried forward — see _carry_forward
+    # / row["lme_stale"]). Note: this means lme_total_t can be fresh (from
+    # Westmetall) on a run where lme_stale=True, because lme_stale tracks the
+    # on-warrant/cancelled *split* + per-location breakdown, which only the LME
+    # site provides and which Westmetall can't refresh on its own.
+    lme_westmetall_t = _num(row.get("lme_stock_westmetall_t"))
     row["lme_total_t"] = _round(
-        lme_closing_t if lme_closing_t is not None else _add(lme_on, lme_can)
+        lme_westmetall_t if lme_westmetall_t is not None
+        else lme_closing_t if lme_closing_t is not None
+        else _add(lme_on, lme_can)
     )
 
     cme_total = _num(row.get("cme_total_t"))

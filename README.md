@@ -108,20 +108,27 @@ Global columns:
 | `global_reported_stock_t` | `cme_total + lme_total + shfe_total` — add up each exchange's headline figure |
 | `global_total_t` | grand total per spec = `global_reported_stock_t` + LME off-warrant |
 
-Sanity check against public sources: `lme_total_t` should equal the "LME copper
-stock" on Westmetall; `cme_total_t` ÷ 0.907185 should equal COMEX "TOTAL COPPER"
-in short tons; `shfe_total_t` should equal the SMM weekly SHFE copper stock. Note
-LME/press often date a given `lme_total_t` one business day later than the source
-file (e.g. the "28 Aug" file's 233,500 t shows as "01 Sep" on Westmetall).
+Sanity check against public sources: `lme_total_t` **is** the "LME copper stock"
+column on Westmetall (see below — that's now its actual source, not just a
+sanity check); `cme_total_t` ÷ 0.907185 should equal COMEX "TOTAL COPPER" in
+short tons; `shfe_total_t` should equal the SMM weekly SHFE copper stock.
 
 ### Harmonisation notes
 
 - **CME**: Registered = on-warrant, Eligible = off-warrant, cancelled = 0 (COMEX
   has no cancelled-warrant concept). Reported in short tons → ×0.907185.
-- **LME**: Open Tonnage = on-warrant (live), Cancelled Tonnage = cancelled,
-  `lme_total_t` = Closing Stock = live + cancelled (the headline "LME copper
-  stock"). Off-warrant comes from the separate T+3 `Daily_OWSR` report and is
-  **not** part of `lme_total_t`.
+- **LME**: Open Tonnage = on-warrant (live), Cancelled Tonnage = cancelled — both
+  **only** available from the LME site's own (Cloudflare-fronted) stock-breakdown
+  report, which also supplies the per-location split. `lme_total_t` (the headline
+  "LME copper stock") instead **prefers the Westmetall `LME_Cu_cash` table's own
+  "LME Copper stock" column** (`lme_stock_westmetall_t`, fetched alongside the
+  price leg — plain HTTP, no Cloudflare, and empirically more reliable than the
+  breakdown report), falling back to the breakdown's own Closing Stock (live +
+  cancelled) if Westmetall is unavailable. Because the two sources can be from
+  slightly different report dates, `lme_total_t` will not always equal exactly
+  `lme_on_warrant_t + lme_cancelled_t` — that's expected, not a bug (see the
+  comment on `_compute_totals` in `scripts/aggregate.py`). Off-warrant comes from
+  the separate T+3 `Daily_OWSR` report and is **not** part of `lme_total_t`.
 - **SHFE**: 仓单 = on-warrant, `库存 − 仓单` = implied non-warranted (shown in the
   *Cancelled* column — **not** a true cancelled-warrant figure), off-warrant not
   reported. The **weekly** report is the source of truth; the daily warrant
@@ -148,7 +155,10 @@ file (e.g. the "28 Aug" file's 233,500 t shows as "01 Sep" on Westmetall).
 
 `comex_copper_usd_t` = most-active COMEX copper month settle (USD/lb) × 2204.62 —
 from Barchart, else the CmeWS settlements API, else Yahoo `HG=F`.
-`lme_copper_cash_usd_t` / `lme_copper_3m_usd_t` from the Westmetall table.
+`lme_copper_cash_usd_t` / `lme_copper_3m_usd_t` / `lme_stock_westmetall_t` all
+come from the same Westmetall `LME_Cu_cash` table row (cash, 3-month, and
+"LME Copper stock" columns) — `lme_stock_westmetall_t` is the preferred source
+for the inventory model's `lme_total_t`, see Harmonisation notes above.
 
 **Same-session (market-on-close) rule.** The COMEX settlement posts ~a day after
 Westmetall's LME official, so `get_cme_lme_copper_spread` fetches the LME leg

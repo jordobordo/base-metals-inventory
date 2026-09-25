@@ -50,8 +50,8 @@ def _comex_history(days: int) -> tuple[pd.DataFrame, str]:
     return get_comex_cme_history(days=12), "CmeWS"
 
 
-def _lme_asof(history: list[tuple[dt.date, float, float | None]], day: dt.date):
-    for d, cash, m3 in history:  # newest first
+def _lme_asof(history: list[tuple[dt.date, float, float | None, float | None]], day: dt.date):
+    for d, cash, m3, _stock in history:  # newest first
         if d <= day:
             return d, cash, m3
     return None
