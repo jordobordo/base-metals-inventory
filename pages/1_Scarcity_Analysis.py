@@ -1,7 +1,8 @@
 """Physical vs Paper Scarcity — institutional read on copper stock drawdowns.
 
-A second Streamlit page (the overview stays in ``app.py``). Everything analytical
-comes from ``scripts/analytics.py``; the charts are in ``views/scarcity.py``.
+A second page under the ``app.py`` router (``st.navigation`` — see there for
+the shared ``st.set_page_config``). Everything analytical comes from
+``scripts/analytics.py``; the charts are in ``views/scarcity.py``.
 
 Run:  streamlit run app.py   → pick "Scarcity Analysis" in the sidebar.
 """
@@ -27,8 +28,9 @@ from views.scarcity import (  # noqa: E402
     chart_warrant_vs_loadout,
     kpi_row,
 )
+from views.theme import inject_css  # noqa: E402
 
-st.set_page_config(page_title="Physical vs Paper Scarcity", page_icon="🔬", layout="wide")
+inject_css()
 
 runs = load_runs(mtime(DATA_PATH))
 geo = load_geo(mtime(GEO_PATH))

@@ -25,19 +25,18 @@ from scripts.analytics import (
     net_draw_rate,
 )
 from scripts.schema import build_daily_series, build_native_asof_series
+from views.theme import (
+    COLOR_CANCELLED as _CANC,
+    COLOR_CME as _SPREAD,        # CME-LME spread line + unmet-spike markers
+    COLOR_DRAW as _DRAW,
+    COLOR_GREY as _GREY,
+    COLOR_LME as _NET,           # "net of hurdle" / secondary line
+    COLOR_ON_WARRANT as _ON,
+    COLOR_REPORTED as _TERM,     # LME cash-3M term-structure line
+    date_axis as _date_axis,
+)
 
-_ON, _CANC = "#5b8def", "#e0a458"          # on-warrant / cancelled (app.py palette)
-_TERM, _DRAW = "#8a7fc0", "#5aa469"        # term structure / draw rate
-_SPREAD, _NET, _GREY = "#d1495b", "#2e86ab", "#9aa0a6"
 _H = 320
-
-
-def _date_axis(dates, **kw) -> alt.Axis:
-    """A temporal axis with one labelled tick per real data date (no auto ticks
-    at half-day / multi-day intervals, no hidden labels)."""
-    vals = sorted({pd.Timestamp(d).normalize() for d in pd.to_datetime(list(dates))})
-    return alt.Axis(values=[v.isoformat() for v in vals], format="%b %d",
-                    labelAngle=-40, labelOverlap=False, **kw)
 
 
 # --------------------------------------------------------------------------- #

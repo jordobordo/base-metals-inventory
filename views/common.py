@@ -1,8 +1,8 @@
 """Shared data-loading + formatting helpers for the dashboard pages.
 
-``app.py`` keeps its own copies of the loaders (it predates this module and the
-user asked to leave it untouched); anything under ``pages/`` imports from here so
-there is one place to change the cache behaviour.
+Every page (the Overview router in ``app.py`` / ``views/overview_page.py``, and
+``pages/1_Scarcity_Analysis.py``) loads its frames from here — one place to
+change the cache behaviour or add a new parquet.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import streamlit as st
 _ROOT = Path(__file__).resolve().parents[1]
 DATA_PATH = _ROOT / "data" / "copper_inventory.parquet"
 GEO_PATH = _ROOT / "data" / "lme_geo.parquet"
+SPREAD_HIST_PATH = _ROOT / "data" / "comex_lme_history.parquet"
 
 
 def mtime(p: Path) -> float:
@@ -46,6 +47,19 @@ def load_geo(token: float) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c])
     return df
+
+
+@st.cache_data(ttl=300)
+def load_spread_history(token: float) -> pd.DataFrame:
+    """Multi-week CME-LME spread by market session (scripts/backfill_prices.py)."""
+    _ = token
+    if not SPREAD_HIST_PATH.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(SPREAD_HIST_PATH)
+    for c in ("session_date", "lme_price_date"):
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c])
+    return df.sort_values("session_date").reset_index(drop=True)
 
 
 def fmt(value: float | None, unit_div: float, suffix: str) -> str:

@@ -33,9 +33,10 @@ Data Architecture and Workflow
 | `scripts/fix_price_history.py` | one-off: re-align the historical CME−LME spread in the run log — rebuild each priced row's LME leg as-of its own `comex_price_date` from Westmetall (`--dry-run` to preview) |
 | `scripts/backfill_prices.py` | build/refresh `data/comex_lme_history.parquet` — one row per market session (COMEX settle date + LME as-of that date + spreads), from Barchart (or the CmeWS window) + Westmetall |
 | `scripts/analytics.py`    | scarcity-vs-reshuffling analytics: warrant-lifecycle / "phantom tightness" flows, rolling 30/90-day Z-score anomaly scan, configurable CME–LME arbitrage-hurdle model, hub concentration / load-out response / `diagnose_anomalies`, and a combined `scarcity_scorecard` |
-| `app.py`                  | Streamlit dashboard — overview page |
-| `pages/1_Scarcity_Analysis.py` | Streamlit dashboard — "Physical vs Paper Scarcity" page (KPI row, spatial concentration, warrant-vs-load-out, term-structure/arb band with an adjustable cost hurdle, anomaly table) |
-| `views/`                  | render helpers for the pages (`common.py` loaders, `scarcity.py` charts) |
+| `app.py`                  | dashboard **router only** — one shared `st.set_page_config`, then `st.navigation([...]).run()` to the two pages below |
+| `views/overview_page.py`  | the Overview page script (sidebar controls, section order) — default page |
+| `pages/1_Scarcity_Analysis.py` | the "Physical vs Paper Scarcity" page script (KPI row, spatial concentration, warrant-vs-load-out, term-structure/arb band with an adjustable cost hurdle, anomaly table) |
+| `views/`                  | shared dashboard code: `common.py` (cached parquet loaders), `theme.py` (design tokens — palette, tabular-nums CSS, the shared date-axis helper), `overview.py` / `scarcity.py` (render functions for each page, no top-level script logic) |
 | `.github/workflows/daily.yml` | daily cron: run aggregator, commit the parquet back |
 | `tests/`                  | offline parser tests + fixtures (no network) |
 
