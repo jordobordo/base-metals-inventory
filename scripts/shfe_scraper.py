@@ -45,8 +45,8 @@ SHFE sits behind a JS-challenge WAF ("WEB 应用防火墙") that blocks bursty /
 datacentre traffic: after ~30 quick requests it starts returning a ~10.6 KB
 challenge page (HTTP 200) instead of the report. This scraper therefore:
 
-    * probes as few URLs as possible — weekly candidates are the last few
-      **Fridays** only, not a day-by-day walk-back;
+        * probes as few URLs as possible — weekly candidates are recent Fridays
+            and nearby weekdays, not a day-by-day walk-back;
     * sleeps between probes;
     * detects the challenge page and raises :class:`SHFEBlockedError` loudly
       (with a longer retry back-off first), rather than returning junk.
@@ -251,13 +251,12 @@ def _looks_like_report(text: str) -> bool:
 
 def _recent_fridays(anchor: dt.date, count: int) -> list[dt.date]:
     """The ``count`` most recent Fridays on or before ``anchor`` (plus the
-    Thursday before each, in case a Friday holiday shifted publication)."""
+    preceding Thursday and Wednesday, in case holidays shift publication)."""
     friday = anchor - dt.timedelta(days=(anchor.weekday() - 4) % 7)
     out: list[dt.date] = []
     for k in range(count):
         f = friday - dt.timedelta(days=7 * k)
-        out.append(f)
-        out.append(f - dt.timedelta(days=1))  # Thursday fallback
+        out.extend(f - dt.timedelta(days=offset) for offset in range(3))
     return out
 
 
@@ -284,8 +283,8 @@ def fetch_shfe_weekly_stock_html(
 ) -> tuple[str, dt.date]:
     """Return (html, url_date) for the most recent weekly stock report.
 
-    Only Friday (and the preceding Thursday) URLs are probed — the weekly report
-    is a Friday publication — so this costs at most ``2 * fridays_to_try`` GETs.
+    Friday plus the preceding two weekdays are probed to cover holiday-shifted
+    releases, at most ``3 * fridays_to_try`` GETs.
     """
     sess, own = _session(session)
     try:

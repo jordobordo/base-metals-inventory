@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.shfe_scraper import (  # noqa: E402
+    _recent_fridays,
     _to_number,
     parse_shfe_daily_warrant,
     parse_shfe_weekly_stock,
@@ -39,6 +40,14 @@ def test_parse_weekly() -> None:
     assert rec["inventory_change_tonnes"] == -17_120.0
     assert rec["warrant_change_tonnes"] == -14_643.0
     print("test_parse_weekly: OK", rec)
+
+
+def test_recent_fridays_includes_holiday_shift_days() -> None:
+    dates = _recent_fridays(dt.date(2026, 10, 8), 2)
+    assert dates == [
+        dt.date(2026, 10, 2), dt.date(2026, 10, 1), dt.date(2026, 9, 30),
+        dt.date(2026, 9, 25), dt.date(2026, 9, 24), dt.date(2026, 9, 23),
+    ]
 
 
 def test_parse_daily() -> None:
@@ -71,6 +80,7 @@ def test_to_number() -> None:
 
 if __name__ == "__main__":
     test_to_number()
+    test_recent_fridays_includes_holiday_shift_days()
     test_parse_weekly()
     test_parse_daily()
     test_weekly_excludes_copper_bc()
